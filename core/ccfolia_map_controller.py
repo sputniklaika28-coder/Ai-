@@ -11,7 +11,10 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from core.vtt_adapters.base_adapter import BaseVTTAdapter
+    try:
+        from core.vtt_adapters.base_adapter import BaseVTTAdapter
+    except ModuleNotFoundError:
+        from vtt_adapters.base_adapter import BaseVTTAdapter
 
 logger = logging.getLogger(__name__)
 GRID_SIZE = 96
