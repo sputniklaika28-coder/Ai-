@@ -1,0 +1,10 @@
+{
+  "pending": [],
+  "last_results": [
+    {
+      "cmd": "move_piece",
+      "result": true,
+      "ok": true
+    }
+  ]
+}
