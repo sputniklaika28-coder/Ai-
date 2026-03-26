@@ -176,8 +176,19 @@ class LMClient:
                 )
 
                 if needs_retry:
-                    print("DEBUG: content空検出 → max_tokens×2でリトライ")
-                    retry_payload = {**payload, "max_tokens": max_tokens * 2}
+                    # 思考トークンが全バジェットを消費している可能性が高いため、
+                    # リトライでは思考を明示的に抑制してコンテンツ生成に集中させる
+                    print("DEBUG: content空検出 → 思考抑制+max_tokens×2でリトライ")
+                    retry_messages = [
+                        {"role": "system", "content": "/no_think\n" + system_prompt},
+                        {"role": "user", "content": user_message},
+                    ]
+                    retry_payload = {
+                        **payload,
+                        "messages": retry_messages,
+                        "max_tokens": max_tokens * 2,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    }
                     retry_resp = requests.post(
                         f"{self.base_url}/v1/chat/completions",
                         json=retry_payload,
@@ -192,22 +203,23 @@ class LMClient:
                         # それでもダメなら最終リトライ
                         # ・max_tokens を ×4 に拡大（思考+出力の両方に十分な余裕）
                         # ・temperature を微増して決定論的な失敗ループを回避
-                        # ・no_think の場合は思考制限を完全に解除
-                        still_needs_retry = (still_ignored and no_think) or (
+                        # ・思考抑制を維持してコンテンツ出力を最優先
+                        still_needs_retry = (still_ignored and True) or (
                             retry_finish == "length" and retry_empty
                         )
                         if still_needs_retry:
-                            print("DEBUG: リトライも空 → max_tokens×4で最終リトライ")
+                            print("DEBUG: リトライも空 → 思考抑制+max_tokens×4で最終リトライ")
                             final_messages = [
-                                {"role": "system", "content": system_prompt},
+                                {"role": "system", "content": "/no_think\n" + system_prompt},
                                 {"role": "user", "content": user_message},
                             ]
                             final_payload = {
-                                k: v for k, v in payload.items() if k != "chat_template_kwargs"
+                                **payload,
+                                "messages": final_messages,
+                                "max_tokens": max_tokens * 4,
+                                "temperature": min(temperature + 0.1, 1.0),
+                                "chat_template_kwargs": {"enable_thinking": False},
                             }
-                            final_payload["messages"] = final_messages
-                            final_payload["max_tokens"] = max_tokens * 4
-                            final_payload["temperature"] = min(temperature + 0.1, 1.0)
                             final_resp = requests.post(
                                 f"{self.base_url}/v1/chat/completions",
                                 json=final_payload,
