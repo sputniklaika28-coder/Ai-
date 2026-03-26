@@ -167,6 +167,8 @@ class LMClient:
                 raw_content, thinking_ignored, finish_reason, content_was_empty = (
                     self._extract_content(result)
                 )
+                # tool_calls はリトライで更新される可能性があるため、最新のレスポンスを追跡する
+                active_result = result
 
                 # リトライ判定:
                 # 1. no_think が無視されて content が空（思考トークンで消費しきった）
@@ -196,6 +198,7 @@ class LMClient:
                     )
                     if retry_resp.status_code == 200:
                         retry_result = retry_resp.json()
+                        active_result = retry_result
                         raw_content, still_ignored, retry_finish, retry_empty = (
                             self._extract_content(retry_result)
                         )
@@ -204,7 +207,7 @@ class LMClient:
                         # ・max_tokens を ×4 に拡大（思考+出力の両方に十分な余裕）
                         # ・temperature を微増して決定論的な失敗ループを回避
                         # ・思考抑制を維持してコンテンツ出力を最優先
-                        still_needs_retry = (still_ignored and True) or (
+                        still_needs_retry = still_ignored or (
                             retry_finish == "length" and retry_empty
                         )
                         if still_needs_retry:
@@ -227,11 +230,12 @@ class LMClient:
                             )
                             if final_resp.status_code == 200:
                                 final_result = final_resp.json()
+                                active_result = final_result
                                 raw_content, _, _, _ = self._extract_content(final_result)
 
                 # ログを見ると、AIがJSONの中にさらに思考を書き込んでいる場合があるため、クリーン処理にかける
                 content = self._clean_response(raw_content)
-                tool_calls = result["choices"][0]["message"].get("tool_calls") or None
+                tool_calls = active_result["choices"][0]["message"].get("tool_calls") or None
 
                 return content, tool_calls
             return None, None

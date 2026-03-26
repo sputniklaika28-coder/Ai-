@@ -433,6 +433,53 @@ class TestGenerateResponse:
         assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
         assert final_payload["messages"][0]["content"].startswith("/no_think")
 
+    def test_retry_returns_tool_calls_from_retry_response(self):
+        """リトライ成功時、tool_calls は初回レスポンスではなくリトライレスポンスから取得する"""
+        client = LMClient()
+
+        # 1回目: content 空 + reasoning あり → リトライ発動
+        first_resp = MagicMock()
+        first_resp.status_code = 200
+        first_resp.json.return_value = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "Thinking...",
+                        "tool_calls": [{"id": "old", "function": {"name": "stale"}}],
+                    },
+                }
+            ]
+        }
+        # 2回目: リトライ成功 + 新しい tool_calls
+        retry_resp = MagicMock()
+        retry_resp.status_code = 200
+        retry_resp.json.return_value = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": '{"ok": true}',
+                        "reasoning_content": "",
+                        "tool_calls": [{"id": "new", "function": {"name": "fresh"}}],
+                    },
+                }
+            ]
+        }
+
+        with (
+            patch.object(client, "is_server_running", return_value=True),
+            patch(
+                "core.lm_client.requests.post", side_effect=[first_resp, retry_resp]
+            ),
+        ):
+            content, tools = client.generate_response("sys", "user", no_think=True)
+
+        assert tools is not None
+        assert tools[0]["id"] == "new"
+        assert tools[0]["function"]["name"] == "fresh"
+
     def test_empty_tool_calls_list_normalized_to_none(self):
         """tool_calls が空リスト [] の場合、None に正規化する"""
         client = LMClient()
