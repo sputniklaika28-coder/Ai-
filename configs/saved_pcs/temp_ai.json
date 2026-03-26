@@ -1,0 +1,43 @@
+{
+  "name": "神代蓮",
+  "department": "境界対策課",
+  "body": 5,
+  "soul": 3,
+  "skill": 4,
+  "magic": 2,
+  "hp": 5,
+  "sp": 3,
+  "armor": 0,
+  "mobility": 3,
+  "weapon": "大型近接",
+  "cloak": "中装",
+  "skills": [
+    {
+      "name": "戦術機動",
+      "cost": 0,
+      "condition": "自動",
+      "effect": "1st_MOVE中宣言 CHK(K,N) 成功: ED+2 & MV×2 & 能動CHK_DIF+1"
+    },
+    {
+      "name": "強靭身体",
+      "cost": 5,
+      "condition": "選択",
+      "effect": "対敵性B_CHK_DICE+2 & HP+2"
+    },
+    {
+      "name": "白兵戦適性",
+      "cost": 5,
+      "condition": "選択",
+      "effect": "MEL_ATK_DICE+2"
+    },
+    {
+      "name": "霊力放出",
+      "cost": "MP1",
+      "condition": "CHK(R+A,N)",
+      "effect": "5*5内任意1マス中心 3*3全体→2rd EVD_DIF=N"
+    }
+  ],
+  "text_history": "元神宮大工衆の弟子。かつて大規模な境界異常で左腕を失い、重傷を負った過去を持つ。現在は義肢を装着し、祓魔術で補う。",
+  "text_career": "境界対策課 祓魔師。現場での実戦経験が豊富。",
+  "text_overall_remarks": "傷跡を隠すため常に袖を長く着る。過去のトラウマから、自身の能力を過信せず慎重に行動する。"
+}

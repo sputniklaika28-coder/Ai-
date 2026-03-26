@@ -1,0 +1,39 @@
+{
+  "characters": {
+    "meta_gm": {
+      "id": "meta_gm",
+      "name": "ゲームマスター",
+      "layer": "meta",
+      "role": "game_master",
+      "keywords": [
+        "GM",
+        "KP",
+        ""
+      ],
+      "description": "シナリオの流れを管理。判定難度を決定。敵配置。",
+      "enabled": true,
+      "is_ai": true,
+      "prompt_id": "meta_gm_template"
+    },
+    "setting_gm_operator": {
+      "id": "setting_gm_operator",
+      "name": "祓魔本部オペレーター",
+      "layer": "setting",
+      "role": "npc_manager",
+      "description": "任務指令を与える。冷静で公式的。",
+      "enabled": true,
+      "is_ai": true,
+      "prompt_id": "setting_gm_operator_template"
+    },
+    "123": {
+      "id": "123",
+      "name": "スイレン",
+      "layer": "player",
+      "role": "player",
+      "description": "プレイヤー！",
+      "enabled": false,
+      "is_ai": false,
+      "prompt_id": "setting_gm_operator_template"
+    }
+  }
+}
