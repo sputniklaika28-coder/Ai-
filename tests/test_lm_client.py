@@ -295,6 +295,9 @@ class TestGenerateResponse:
         # 2回目の max_tokens が倍になっていることを確認
         retry_payload = mock_post.call_args_list[1][1]["json"]
         assert retry_payload["max_tokens"] == 8192
+        # リトライで思考抑制が追加されていることを確認
+        assert retry_payload.get("chat_template_kwargs") == {"enable_thinking": False}
+        assert retry_payload["messages"][0]["content"].startswith("/no_think")
 
     def test_no_retry_when_no_think_is_false_and_finish_reason_stop(self):
         """no_think=False かつ finish_reason=stop の場合、思考が無視されてもリトライしない"""
@@ -372,6 +375,9 @@ class TestGenerateResponse:
         assert mock_post.call_count == 2
         retry_payload = mock_post.call_args_list[1][1]["json"]
         assert retry_payload["max_tokens"] == 16384
+        # no_think=False でもリトライ時は思考抑制が追加される
+        assert retry_payload.get("chat_template_kwargs") == {"enable_thinking": False}
+        assert retry_payload["messages"][0]["content"].startswith("/no_think")
 
     def test_final_retry_on_finish_reason_length_without_no_think(self):
         """no_think=False でも finish_reason=length が連続すれば最終リトライ（×4）する"""
@@ -423,6 +429,9 @@ class TestGenerateResponse:
         final_payload = mock_post.call_args_list[2][1]["json"]
         assert final_payload["max_tokens"] == 8192 * 4
         assert abs(final_payload["temperature"] - 0.8) < 1e-9
+        # 最終リトライでも思考抑制が適用されている
+        assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
+        assert final_payload["messages"][0]["content"].startswith("/no_think")
 
     def test_empty_tool_calls_list_normalized_to_none(self):
         """tool_calls が空リスト [] の場合、None に正規化する"""
@@ -493,8 +502,8 @@ class TestGenerateResponse:
         assert '"name"' in content
         assert "テスト太郎" in content
 
-    def test_final_retry_removes_thinking_and_increases_tokens(self):
-        """2回リトライしても空の場合、思考制限を完全解除して最終リトライする"""
+    def test_final_retry_suppresses_thinking_and_increases_tokens(self):
+        """2回リトライしても空の場合、思考抑制を維持してmax_tokens×4で最終リトライする"""
         client = LMClient()
         empty_resp = MagicMock()
         empty_resp.status_code = 200
@@ -539,10 +548,10 @@ class TestGenerateResponse:
 
         assert mock_post.call_count == 3
         final_payload = mock_post.call_args_list[2][1]["json"]
-        # chat_template_kwargs が除去されている
-        assert "chat_template_kwargs" not in final_payload
-        # /no_think プレフィックスが除去されている
-        assert not final_payload["messages"][0]["content"].startswith("/no_think")
+        # 思考抑制が適用されている
+        assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
+        # /no_think プレフィックスが適用されている
+        assert final_payload["messages"][0]["content"].startswith("/no_think")
         # max_tokens が ×4 に拡大されている
         assert final_payload["max_tokens"] == 4096 * 4
         # temperature が +0.1 されている
@@ -593,6 +602,8 @@ class TestGenerateResponse:
 
         final_payload = mock_post.call_args_list[2][1]["json"]
         assert final_payload["temperature"] == 1.0
+        # 思考抑制が適用されている
+        assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
 
 
 # ──────────────────────────────────────────
