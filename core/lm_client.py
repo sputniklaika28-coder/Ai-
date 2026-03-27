@@ -170,11 +170,17 @@ class LMClient:
                 # tool_calls はリトライで更新される可能性があるため、最新のレスポンスを追跡する
                 active_result = result
 
+                # reasoning_content から有効な JSON を抽出済みなら
+                # content は補完されているのでリトライ不要
+                json_recovered = content_was_empty and bool(raw_content.strip())
+
                 # リトライ判定:
                 # 1. no_think が無視されて content が空（思考トークンで消費しきった）
                 # 2. finish_reason=length で元の content が空（トークン上限到達）
-                needs_retry = (thinking_ignored and no_think) or (
-                    finish_reason == "length" and content_was_empty
+                # ただし reasoning から JSON 抽出に成功した場合はスキップ
+                needs_retry = not json_recovered and (
+                    (thinking_ignored and no_think)
+                    or (finish_reason == "length" and content_was_empty)
                 )
 
                 if needs_retry:
