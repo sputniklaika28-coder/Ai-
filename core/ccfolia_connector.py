@@ -514,7 +514,10 @@ class CCFoliaConnector:
                 zero_count = 0
 
             new_msgs = [
-                m for m in current if f"{m['speaker']}|{m['body']}" not in self._known_messages
+                m for m in current
+                if f"{m['speaker']}|{m['body']}" not in self._known_messages
+                and not m["body"].startswith("[AI]")
+                and "[AI] " not in m["body"][:10]
             ]
 
             poll_count += 1
