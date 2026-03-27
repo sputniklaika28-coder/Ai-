@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import queue
 import re
 import sys
 import threading
@@ -213,6 +214,7 @@ class CCFoliaConnector:
         self._known_messages: list[str] = []
         self._sent_bodies: set[str] = set()
         self._running = False
+        self._stdin_queue: queue.Queue[dict] = queue.Queue()
 
     # ──────────────────────────────────────────
     # 初期化 / 終了
@@ -539,28 +541,44 @@ class CCFoliaConnector:
                                 print(f"   ✓ 応答: {res[:40]}...")
 
             self._known_messages = self._known_messages[-300:]
+            self._drain_stdin_queue()
             time.sleep(self.poll_interval)
 
     def _stdin_monitor_loop(self) -> None:
-        """ランチャーからの送信命令を受け取る監視ループ。"""
+        """ランチャーからの送信命令を受け取り、キューに積む。
+
+        Playwright はスレッドセーフでないため、実際の送信はメインスレッド
+        (_monitor_loop) 側で処理する。
+        """
         for line in sys.stdin:
             line = line.strip()
             if not line:
                 continue
             try:
                 data = json.loads(line)
+                if data.get("type") == "quit":
+                    self._running = False
+                    break
+                self._stdin_queue.put(data)
+            except json.JSONDecodeError:
+                pass
+            except Exception as e:
+                print(f"❌ 標準入力の処理エラー: {e}")
+
+    def _drain_stdin_queue(self) -> None:
+        """メインスレッドで stdin キューに溜まった命令を処理する。"""
+        while not self._stdin_queue.empty():
+            try:
+                data = self._stdin_queue.get_nowait()
                 if data.get("type") == "chat":
                     text = data.get("text", "")
                     char_name = data.get("character", "GM")
                     print(f"📥 ランチャーから送信命令を受信: {text[:20]}...")
                     self._post_message(char_name, text)
-                elif data.get("type") == "quit":
-                    self._running = False
-                    break
-            except json.JSONDecodeError:
-                pass
+            except queue.Empty:
+                break
             except Exception as e:
-                print(f"❌ 標準入力の処理エラー: {e}")
+                print(f"❌ stdin命令の処理エラー: {e}")
 
     # ──────────────────────────────────────────
     # メインエントリーポイント
@@ -573,12 +591,12 @@ class CCFoliaConnector:
         self._init_knowledge()
         self._running = True
 
-        threading.Thread(target=self._monitor_loop, daemon=True).start()
+        # stdin監視だけ別スレッド（Playwright を触らない）
         threading.Thread(target=self._stdin_monitor_loop, daemon=True).start()
 
+        # チャット監視はメインスレッドで実行（Playwright はスレッドセーフでないため）
         try:
-            while self._running:
-                time.sleep(1)
+            self._monitor_loop()
         except KeyboardInterrupt:
             self._running = False
             print("終了します")
