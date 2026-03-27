@@ -14,7 +14,13 @@ import logging
 import re
 from pathlib import Path
 
-from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
+try:
+    from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
+
+    _HAS_PLAYWRIGHT = True
+except ModuleNotFoundError:
+    _HAS_PLAYWRIGHT = False
+    Browser = BrowserContext = Page = sync_playwright = None  # type: ignore[assignment,misc]
 
 from core.vtt_adapters.base_adapter import BaseVTTAdapter
 
@@ -52,6 +58,12 @@ class CCFoliaAdapter(BaseVTTAdapter):
 
     def connect(self, room_url: str, headless: bool = False) -> None:
         """Chromium を起動して CCFolia ルームに接続する。"""
+        if not _HAS_PLAYWRIGHT:
+            raise ModuleNotFoundError(
+                "playwright パッケージが見つかりません。\n"
+                "  pip install playwright && python -m playwright install chromium\n"
+                "を実行してください。"
+            )
         profile_dir = Path.home() / "AppData/Local/TacticalAI/PlaywrightProfile_AI"
         profile_dir.mkdir(parents=True, exist_ok=True)
 
