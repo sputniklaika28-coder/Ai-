@@ -103,17 +103,17 @@ class CCFoliaAdapter(BaseVTTAdapter):
         try:
             self._page.wait_for_selector(_CHAT_INPUT, timeout=30_000)
             logger.info("チャット入力欄を確認")
-            print("   ✓ チャット入力欄を検出")
+            print("   ✓ チャット入力欄を検出", flush=True)
         except Exception:
             logger.warning("チャット入力欄が見つかりません（ログインや入室が必要かもしれません）")
-            print("   ⚠ チャット入力欄が見つかりません（ログインや入室が必要かもしれません）")
+            print("   ⚠ チャット入力欄が見つかりません（ログインや入室が必要かもしれません）", flush=True)
 
         # チャットメッセージ要素の存在確認
         try:
             msgs = self._page.query_selector_all(_CHAT_MESSAGES)
-            print(f"   DEBUG: チャットメッセージ要素数={len(msgs)} (セレクタ: {_CHAT_MESSAGES})")
+            print(f"   DEBUG: チャットメッセージ要素数={len(msgs)} (セレクタ: {_CHAT_MESSAGES})", flush=True)
             if not msgs:
-                print("   ⚠ チャットメッセージ要素が0件です。CCFoliaのDOM構造を確認してください。")
+                print("   ⚠ チャットメッセージ要素が0件です。CCFoliaのDOM構造を確認してください。", flush=True)
                 # ページ内の主要なクラス名をダンプして調査を助ける
                 sample = self._page.evaluate("""() => {
                     const els = document.querySelectorAll('div[class]');
@@ -123,9 +123,9 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     }
                     return Array.from(classes).slice(0, 50).join(', ');
                 }""")
-                print(f"   DEBUG: ページ内のCSSクラス(一部): {sample}")
+                print(f"   DEBUG: ページ内のCSSクラス(一部): {sample}", flush=True)
         except Exception as e:
-            print(f"   DEBUG: メッセージ要素チェック失敗: {e}")
+            print(f"   DEBUG: メッセージ要素チェック失敗: {e}", flush=True)
 
     def close(self) -> None:
         """ブラウザを閉じて接続を切断する。"""

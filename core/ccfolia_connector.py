@@ -15,6 +15,14 @@ import logging
 import queue
 import re
 import sys
+
+# ランチャーからパイプ経由で起動された場合、stdout がブロックバッファリングになり
+# print 出力がリアルタイムに表示されない。行バッファリングに切り替える。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+elif not sys.stdout.isatty():
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 import threading
 import time
 from pathlib import Path
