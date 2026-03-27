@@ -113,6 +113,30 @@ class CCFoliaAdapter(BaseVTTAdapter):
             msgs = self._page.query_selector_all(_CHAT_MESSAGES)
             print(f"   DEBUG: 主セレクタ({_CHAT_MESSAGES})={len(msgs)}件")
 
+            # 見つかった要素の生テキストをダンプ（DOM構造デバッグ用）
+            if msgs:
+                for i, m in enumerate(msgs[:5]):
+                    raw_text = (m.text_content() or "").strip()
+                    inner = (m.inner_html() or "")[:200]
+                    print(f"   DEBUG: 要素[{i}] text='{raw_text[:80]}' html='{inner}'")
+                    # 子要素の構造も確認
+                    children_info = self._page.evaluate(
+                        """(el) => {
+                            const out = [];
+                            for (const c of el.children) {
+                                out.push({
+                                    tag: c.tagName,
+                                    cls: c.className || '',
+                                    text: (c.textContent || '').trim().substring(0, 50)
+                                });
+                            }
+                            return out;
+                        }""", m)
+                    if children_info:
+                        for ci in children_info[:4]:
+                            print(f"     子要素: <{ci['tag']} class='{ci['cls']}'> "
+                                  f"'{ci['text']}'")
+
             # JS抽出も試行
             js_msgs = self.get_chat_messages()
             print(f"   DEBUG: JS抽出メッセージ数={len(js_msgs)}件")
@@ -120,8 +144,8 @@ class CCFoliaAdapter(BaseVTTAdapter):
                 sample = js_msgs[-1]
                 print(f"   DEBUG: 最新メッセージ例: [{sample['speaker']}] {sample['body'][:40]}")
 
-            if not msgs and not js_msgs:
-                print("   ⚠ チャットメッセージが検出できません。")
+            if not js_msgs:
+                print("   ⚠ チャットメッセージのパースに失敗しています。")
                 print("   ⚠ CCFoliaにログイン済み・入室済みか確認してください。")
                 # DOM構造の診断情報を出力
                 diag = self._page.evaluate("""() => {
@@ -135,17 +159,37 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     info.textareas = document.querySelectorAll('textarea').length;
                     // role=listitem の数
                     info.listItems = document.querySelectorAll('[role="listitem"]').length;
-                    // 主要なクラス名
+                    // MuiListItem系の数
+                    info.muiListItems = document.querySelectorAll(
+                        '[class*="MuiListItem"]'
+                    ).length;
+                    // 主要なクラス名（Muiを優先的に抽出）
                     const els = document.querySelectorAll('div[class]');
                     const classes = new Set();
-                    for (let i = 0; i < Math.min(els.length, 300); i++) {
-                        els[i].className.split(' ').forEach(c => { if (c) classes.add(c); });
+                    const muiClasses = new Set();
+                    for (let i = 0; i < Math.min(els.length, 500); i++) {
+                        els[i].className.split(' ').forEach(c => {
+                            if (c) {
+                                classes.add(c);
+                                if (c.includes('Mui') || c.includes('chat') ||
+                                    c.includes('Chat') || c.includes('message') ||
+                                    c.includes('Message') || c.includes('log') ||
+                                    c.includes('Log')) {
+                                    muiClasses.add(c);
+                                }
+                            }
+                        });
                     }
+                    info.chatRelatedClasses = Array.from(muiClasses).join(', ');
                     info.sampleClasses = Array.from(classes).slice(0, 60).join(', ');
                     return info;
                 }""")
                 print(f"   DEBUG: DOM診断: textareas={diag.get('textareas')}, "
-                      f"listItems={diag.get('listItems')}, scrollAreas={diag.get('scrollAreas')}")
+                      f"listItems={diag.get('listItems')}, "
+                      f"muiListItems={diag.get('muiListItems')}, "
+                      f"scrollAreas={diag.get('scrollAreas')}")
+                print(f"   DEBUG: チャット関連クラス: "
+                      f"{diag.get('chatRelatedClasses', 'N/A')}")
                 print(f"   DEBUG: CSSクラス(一部): {diag.get('sampleClasses', 'N/A')}")
         except Exception as e:
             print(f"   DEBUG: メッセージ要素チェック失敗: {e}")
@@ -368,12 +412,17 @@ class CCFoliaAdapter(BaseVTTAdapter):
             # JS抽出が空ならCSSセレクタベースのフォールバック
             selectors = [
                 _CHAT_MESSAGES,
+                "[class*='MuiListItem']",
+                "[class*='MuiListItemText']",
                 "[class*='ChatMessage']",
                 "[class*='chatMessage']",
                 "[class*='message-list'] > div",
                 "div[class*='MuiList'] div[class*='MuiListItem']",
                 "div[class*='chat'] div[class*='item']",
                 "div[class*='log'] > div",
+                "[role='listitem']",
+                "li[class*='message']",
+                "li[class*='Message']",
             ]
             items = []
             for sel in selectors:
@@ -405,18 +454,78 @@ class CCFoliaAdapter(BaseVTTAdapter):
                 const results = [];
                 const _SKIP = new Set(["メイン", "情報", "noname"]);
 
-                // 戦略1: MuiListItemText（従来のセレクタ）
+                function tryParse(el) {
+                    const text = (el.textContent || "").trim();
+                    if (!text) return null;
+
+                    // 戦略A: 子要素からspeaker/bodyを分離（子が2つ以上ある場合）
+                    const children = el.children;
+                    if (children.length >= 2) {
+                        const firstText = (children[0].textContent || "").trim();
+                        const restParts = [];
+                        for (let i = 1; i < children.length; i++) {
+                            const t = (children[i].textContent || "").trim();
+                            if (t) restParts.push(t);
+                        }
+                        if (firstText && restParts.length > 0) {
+                            const body = restParts.join(" ");
+                            if (!_SKIP.has(firstText) && !firstText.includes("[AI]") && body.length > 0) {
+                                return {speaker: firstText, body: body};
+                            }
+                        }
+                    }
+
+                    // 戦略B: 改行区切りでspeaker/bodyを分離
+                    const lines = text.split(/\\n/).map(l => l.trim()).filter(Boolean);
+                    if (lines.length >= 2) {
+                        const speaker = lines[0];
+                        const body = lines.slice(1).join(" ");
+                        if (!_SKIP.has(speaker) && !speaker.includes("[AI]") && body.length > 0) {
+                            return {speaker: speaker, body: body};
+                        }
+                    }
+
+                    // 戦略C: 「名前: 本文」形式
+                    const colonMatch = text.match(/^(.+?)[：:]\s*(.+)$/s);
+                    if (colonMatch) {
+                        const speaker = colonMatch[1].trim();
+                        const body = colonMatch[2].trim();
+                        if (!_SKIP.has(speaker) && !speaker.includes("[AI]") && body.length > 0) {
+                            return {speaker: speaker, body: body};
+                        }
+                    }
+
+                    return null;
+                }
+
+                // 検出戦略1: MuiListItemText（従来のセレクタ）
                 let items = document.querySelectorAll('div.MuiListItemText-root');
 
-                // 戦略2: role=listitem 内のテキスト要素
+                // 検出戦略2: MuiListItem系全般
+                if (!items.length) {
+                    items = document.querySelectorAll(
+                        '[class*="MuiListItem"], [class*="MuiListItemText"]'
+                    );
+                }
+
+                // 検出戦略3: role=listitem
                 if (!items.length) {
                     items = document.querySelectorAll('[role="listitem"]');
                 }
 
-                // 戦略3: チャットログ風の長いスクロール領域内の子要素
+                // 検出戦略4: data-testid や aria ベース
+                if (!items.length) {
+                    items = document.querySelectorAll(
+                        '[data-testid*="message"], [data-testid*="chat"], ' +
+                        '[aria-label*="メッセージ"], [aria-label*="チャット"]'
+                    );
+                }
+
+                // 検出戦略5: チャットログ風の長いスクロール領域内の子要素
                 if (!items.length) {
                     const scrollAreas = document.querySelectorAll(
-                        'div[style*="overflow"], [class*="scroll"], [class*="list"], [class*="log"], [class*="chat"]'
+                        'div[style*="overflow"], [class*="scroll"], [class*="list"], ' +
+                        '[class*="log"], [class*="chat"], [class*="Chat"]'
                     );
                     for (const area of scrollAreas) {
                         if (area.scrollHeight > 300 && area.children.length > 2) {
@@ -426,23 +535,25 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     }
                 }
 
+                // 検出戦略6: ul/ol 内の li 要素（チャットログがリスト構造の場合）
+                if (!items.length) {
+                    const lists = document.querySelectorAll('ul, ol');
+                    for (const list of lists) {
+                        if (list.children.length > 2) {
+                            items = list.querySelectorAll('li');
+                            if (items.length > 2) break;
+                            items = [];
+                        }
+                    }
+                }
+
                 if (!items || !items.length) return results;
 
                 for (const el of items) {
-                    const text = (el.textContent || "").trim();
-                    if (!text) continue;
-
-                    const lines = text.split(/\\n/).map(l => l.trim()).filter(Boolean);
-                    if (lines.length < 2) continue;
-
-                    const speaker = lines[0];
-                    const body = lines.slice(1).join(" ");
-
-                    if (_SKIP.has(speaker)) continue;
-                    if (speaker.includes("[AI]")) continue;
-                    if (body.length < 1) continue;
-
-                    results.push({speaker: speaker, body: body});
+                    const parsed = tryParse(el);
+                    if (parsed) {
+                        results.push(parsed);
+                    }
                 }
                 return results;
             }""")
@@ -458,10 +569,35 @@ class CCFoliaAdapter(BaseVTTAdapter):
         _SKIP = {"メイン", "情報", "noname"}
         try:
             text = el.text_content() or ""
-            lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+            text = text.strip()
+            if not text:
+                return None
+
+            # 戦略A: 改行区切りで2行以上
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
             if len(lines) >= 2:
                 speaker, body = lines[0], " ".join(lines[1:])
                 if speaker not in _SKIP and "[AI]" not in speaker:
+                    return {"speaker": speaker, "body": body}
+
+            # 戦略B: 子要素から分離
+            children = el.query_selector_all(":scope > *")
+            if len(children) >= 2:
+                first = (children[0].text_content() or "").strip()
+                rest = " ".join(
+                    (c.text_content() or "").strip()
+                    for c in children[1:]
+                    if (c.text_content() or "").strip()
+                )
+                if first and rest and first not in _SKIP and "[AI]" not in first:
+                    return {"speaker": first, "body": rest}
+
+            # 戦略C: 「名前：本文」形式
+            import re as _re
+            m = _re.match(r'^(.+?)[：:]\s*(.+)$', text, _re.DOTALL)
+            if m:
+                speaker, body = m.group(1).strip(), m.group(2).strip()
+                if speaker not in _SKIP and "[AI]" not in speaker and body:
                     return {"speaker": speaker, "body": body}
         except Exception:
             pass
