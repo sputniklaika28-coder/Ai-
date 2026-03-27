@@ -108,22 +108,45 @@ class CCFoliaAdapter(BaseVTTAdapter):
             logger.warning("チャット入力欄が見つかりません（ログインや入室が必要かもしれません）")
             print("   ⚠ チャット入力欄が見つかりません（ログインや入室が必要かもしれません）")
 
-        # チャットメッセージ要素の存在確認
+        # チャットメッセージ要素の存在確認（複数手法で診断）
         try:
             msgs = self._page.query_selector_all(_CHAT_MESSAGES)
-            print(f"   DEBUG: チャットメッセージ要素数={len(msgs)} (セレクタ: {_CHAT_MESSAGES})")
-            if not msgs:
-                print("   ⚠ チャットメッセージ要素が0件です。CCFoliaのDOM構造を確認してください。")
-                # ページ内の主要なクラス名をダンプして調査を助ける
-                sample = self._page.evaluate("""() => {
+            print(f"   DEBUG: 主セレクタ({_CHAT_MESSAGES})={len(msgs)}件")
+
+            # JS抽出も試行
+            js_msgs = self.get_chat_messages()
+            print(f"   DEBUG: JS抽出メッセージ数={len(js_msgs)}件")
+            if js_msgs:
+                sample = js_msgs[-1]
+                print(f"   DEBUG: 最新メッセージ例: [{sample['speaker']}] {sample['body'][:40]}")
+
+            if not msgs and not js_msgs:
+                print("   ⚠ チャットメッセージが検出できません。")
+                print("   ⚠ CCFoliaにログイン済み・入室済みか確認してください。")
+                # DOM構造の診断情報を出力
+                diag = self._page.evaluate("""() => {
+                    const info = {};
+                    // スクロール領域の検出
+                    const scrollAreas = document.querySelectorAll(
+                        'div[style*="overflow"], [class*="scroll"], [class*="list"]'
+                    );
+                    info.scrollAreas = scrollAreas.length;
+                    // textarea の数
+                    info.textareas = document.querySelectorAll('textarea').length;
+                    // role=listitem の数
+                    info.listItems = document.querySelectorAll('[role="listitem"]').length;
+                    // 主要なクラス名
                     const els = document.querySelectorAll('div[class]');
                     const classes = new Set();
-                    for (let i = 0; i < Math.min(els.length, 200); i++) {
+                    for (let i = 0; i < Math.min(els.length, 300); i++) {
                         els[i].className.split(' ').forEach(c => { if (c) classes.add(c); });
                     }
-                    return Array.from(classes).slice(0, 50).join(', ');
+                    info.sampleClasses = Array.from(classes).slice(0, 60).join(', ');
+                    return info;
                 }""")
-                print(f"   DEBUG: ページ内のCSSクラス(一部): {sample}")
+                print(f"   DEBUG: DOM診断: textareas={diag.get('textareas')}, "
+                      f"listItems={diag.get('listItems')}, scrollAreas={diag.get('scrollAreas')}")
+                print(f"   DEBUG: CSSクラス(一部): {diag.get('sampleClasses', 'N/A')}")
         except Exception as e:
             print(f"   DEBUG: メッセージ要素チェック失敗: {e}")
 
@@ -337,34 +360,112 @@ class CCFoliaAdapter(BaseVTTAdapter):
         """チャットメッセージ一覧を取得する。"""
         messages: list[dict] = []
         try:
-            # 主セレクタで取得を試み、0件ならフォールバックセレクタを試す
-            items = self.page.query_selector_all(_CHAT_MESSAGES)
+            # まず JavaScript 評価で直接メッセージを抽出（DOM構造に依存しにくい）
+            js_messages = self._extract_messages_via_js()
+            if js_messages:
+                return js_messages
+
+            # JS抽出が空ならCSSセレクタベースのフォールバック
+            selectors = [
+                _CHAT_MESSAGES,
+                "[class*='ChatMessage']",
+                "[class*='chatMessage']",
+                "[class*='message-list'] > div",
+                "div[class*='MuiList'] div[class*='MuiListItem']",
+                "div[class*='chat'] div[class*='item']",
+                "div[class*='log'] > div",
+            ]
+            items = []
+            for sel in selectors:
+                items = self.page.query_selector_all(sel)
+                if items:
+                    logger.info("CSSセレクタで検出: %s (%d件)", sel, len(items))
+                    break
+
             if not items:
-                # CCFolia の DOM 更新に備えたフォールバック
-                for fallback in [
-                    "[class*='ChatMessage']",
-                    "[class*='chatMessage']",
-                    "[class*='message-list'] > div",
-                    "div[class*='MuiList'] div[class*='MuiListItem']",
-                ]:
-                    items = self.page.query_selector_all(fallback)
-                    if items:
-                        logger.info("フォールバックセレクタで検出: %s (%d件)", fallback, len(items))
-                        break
-                if not items:
-                    logger.debug("チャット要素が見つかりません (セレクタ: %s)", _CHAT_MESSAGES)
-                    return messages
+                logger.debug("チャット要素が見つかりません")
+                return messages
 
             for el in items:
-                text = el.text_content() or ""
-                lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-                if len(lines) >= 2:
-                    speaker, body = lines[0], " ".join(lines[1:])
-                    if speaker not in ["メイン", "情報", "noname"] and "[AI]" not in speaker:
-                        messages.append({"speaker": speaker, "body": body})
+                parsed = self._parse_chat_element(el)
+                if parsed:
+                    messages.append(parsed)
         except Exception as e:
             logger.error("get_chat_messages エラー: %s", e)
         return messages
+
+    def _extract_messages_via_js(self) -> list[dict]:
+        """JavaScriptでDOMを走査してチャットメッセージを抽出する。
+
+        CCFoliaのDOM構造変更に対してCSSセレクタより堅牢。
+        チャットログ領域を自動検出し、各メッセージから発言者と本文を取得する。
+        """
+        try:
+            raw = self.page.evaluate("""() => {
+                const results = [];
+                const _SKIP = new Set(["メイン", "情報", "noname"]);
+
+                // 戦略1: MuiListItemText（従来のセレクタ）
+                let items = document.querySelectorAll('div.MuiListItemText-root');
+
+                // 戦略2: role=listitem 内のテキスト要素
+                if (!items.length) {
+                    items = document.querySelectorAll('[role="listitem"]');
+                }
+
+                // 戦略3: チャットログ風の長いスクロール領域内の子要素
+                if (!items.length) {
+                    const scrollAreas = document.querySelectorAll(
+                        'div[style*="overflow"], [class*="scroll"], [class*="list"], [class*="log"], [class*="chat"]'
+                    );
+                    for (const area of scrollAreas) {
+                        if (area.scrollHeight > 300 && area.children.length > 2) {
+                            items = area.children;
+                            break;
+                        }
+                    }
+                }
+
+                if (!items || !items.length) return results;
+
+                for (const el of items) {
+                    const text = (el.textContent || "").trim();
+                    if (!text) continue;
+
+                    const lines = text.split(/\\n/).map(l => l.trim()).filter(Boolean);
+                    if (lines.length < 2) continue;
+
+                    const speaker = lines[0];
+                    const body = lines.slice(1).join(" ");
+
+                    if (_SKIP.has(speaker)) continue;
+                    if (speaker.includes("[AI]")) continue;
+                    if (body.length < 1) continue;
+
+                    results.push({speaker: speaker, body: body});
+                }
+                return results;
+            }""")
+            if raw and len(raw) > 0:
+                return raw
+        except Exception as e:
+            logger.debug("JS メッセージ抽出エラー: %s", e)
+        return []
+
+    @staticmethod
+    def _parse_chat_element(el) -> dict | None:
+        """単一のチャット要素からspeakerとbodyを抽出する。"""
+        _SKIP = {"メイン", "情報", "noname"}
+        try:
+            text = el.text_content() or ""
+            lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+            if len(lines) >= 2:
+                speaker, body = lines[0], " ".join(lines[1:])
+                if speaker not in _SKIP and "[AI]" not in speaker:
+                    return {"speaker": speaker, "body": body}
+        except Exception:
+            pass
+        return None
 
     # ──────────────────────────────────────────
     # スクリーンショット
