@@ -18,8 +18,9 @@ import threading
 import time
 from pathlib import Path
 
-# 同階層モジュール
+# 同階層モジュール + リポジトリルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from ccfolia_map_controller import MAP_TOOLS, CCFoliaMapController, execute_map_tool
 from character_manager import CharacterManager
 from knowledge_manager import KnowledgeManager

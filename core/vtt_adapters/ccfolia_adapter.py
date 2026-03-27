@@ -22,7 +22,10 @@ except ModuleNotFoundError:
     _HAS_PLAYWRIGHT = False
     Browser = BrowserContext = Page = sync_playwright = None  # type: ignore[assignment,misc]
 
-from core.vtt_adapters.base_adapter import BaseVTTAdapter
+try:
+    from core.vtt_adapters.base_adapter import BaseVTTAdapter
+except ModuleNotFoundError:
+    from vtt_adapters.base_adapter import BaseVTTAdapter
 
 logger = logging.getLogger(__name__)
 
