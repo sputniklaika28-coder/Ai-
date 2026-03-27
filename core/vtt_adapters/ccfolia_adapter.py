@@ -103,8 +103,29 @@ class CCFoliaAdapter(BaseVTTAdapter):
         try:
             self._page.wait_for_selector(_CHAT_INPUT, timeout=30_000)
             logger.info("チャット入力欄を確認")
+            print("   ✓ チャット入力欄を検出")
         except Exception:
             logger.warning("チャット入力欄が見つかりません（ログインや入室が必要かもしれません）")
+            print("   ⚠ チャット入力欄が見つかりません（ログインや入室が必要かもしれません）")
+
+        # チャットメッセージ要素の存在確認
+        try:
+            msgs = self._page.query_selector_all(_CHAT_MESSAGES)
+            print(f"   DEBUG: チャットメッセージ要素数={len(msgs)} (セレクタ: {_CHAT_MESSAGES})")
+            if not msgs:
+                print("   ⚠ チャットメッセージ要素が0件です。CCFoliaのDOM構造を確認してください。")
+                # ページ内の主要なクラス名をダンプして調査を助ける
+                sample = self._page.evaluate("""() => {
+                    const els = document.querySelectorAll('div[class]');
+                    const classes = new Set();
+                    for (let i = 0; i < Math.min(els.length, 200); i++) {
+                        els[i].className.split(' ').forEach(c => { if (c) classes.add(c); });
+                    }
+                    return Array.from(classes).slice(0, 50).join(', ');
+                }""")
+                print(f"   DEBUG: ページ内のCSSクラス(一部): {sample}")
+        except Exception as e:
+            print(f"   DEBUG: メッセージ要素チェック失敗: {e}")
 
     def close(self) -> None:
         """ブラウザを閉じて接続を切断する。"""
@@ -316,7 +337,24 @@ class CCFoliaAdapter(BaseVTTAdapter):
         """チャットメッセージ一覧を取得する。"""
         messages: list[dict] = []
         try:
+            # 主セレクタで取得を試み、0件ならフォールバックセレクタを試す
             items = self.page.query_selector_all(_CHAT_MESSAGES)
+            if not items:
+                # CCFolia の DOM 更新に備えたフォールバック
+                for fallback in [
+                    "[class*='ChatMessage']",
+                    "[class*='chatMessage']",
+                    "[class*='message-list'] > div",
+                    "div[class*='MuiList'] div[class*='MuiListItem']",
+                ]:
+                    items = self.page.query_selector_all(fallback)
+                    if items:
+                        logger.info("フォールバックセレクタで検出: %s (%d件)", fallback, len(items))
+                        break
+                if not items:
+                    logger.debug("チャット要素が見つかりません (セレクタ: %s)", _CHAT_MESSAGES)
+                    return messages
+
             for el in items:
                 text = el.text_content() or ""
                 lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
@@ -324,8 +362,8 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     speaker, body = lines[0], " ".join(lines[1:])
                     if speaker not in ["メイン", "情報", "noname"] and "[AI]" not in speaker:
                         messages.append({"speaker": speaker, "body": body})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("get_chat_messages エラー: %s", e)
         return messages
 
     # ──────────────────────────────────────────

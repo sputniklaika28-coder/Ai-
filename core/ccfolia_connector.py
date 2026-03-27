@@ -471,14 +471,31 @@ class CCFoliaConnector:
 
     def _monitor_loop(self) -> None:
         print("👁️  チャット監視開始")
+        keywords = self.detector.keyword_map.get("meta_gm", [])
+        print(f"   DEBUG: トリガーキーワード = {keywords}")
+        print("   DEBUG: トリガー条件 = メッセージに '＞' を含む OR キーワード一致")
         time.sleep(2)
-        self._known_messages = [f"{m['speaker']}|{m['body']}" for m in self._get_chat_messages()]
+        initial = self._get_chat_messages()
+        self._known_messages = [f"{m['speaker']}|{m['body']}" for m in initial]
+        print(f"   DEBUG: 既存メッセージ数={len(self._known_messages)}")
 
+        poll_count = 0
         while self._running:
-            current = self._get_chat_messages()
+            try:
+                current = self._get_chat_messages()
+            except Exception as e:
+                print(f"   DEBUG: メッセージ取得エラー: {e}")
+                time.sleep(self.poll_interval)
+                continue
+
             new_msgs = [
                 m for m in current if f"{m['speaker']}|{m['body']}" not in self._known_messages
             ]
+
+            poll_count += 1
+            # 最初の5回と、以降30回ごとにポーリング状態を表示
+            if poll_count <= 5 or poll_count % 30 == 0:
+                print(f"   DEBUG: poll#{poll_count} 取得={len(current)}件 新着={len(new_msgs)}件")
 
             if new_msgs:
                 for msg in new_msgs:
@@ -488,9 +505,11 @@ class CCFoliaConnector:
                     self.ctx.add_message(speaker, body)
                     print(f"\n📨 新着: [{speaker}] {body[:40]}")
 
-                    if "＞" in body or any(
-                        k in body for k in self.detector.keyword_map.get("meta_gm", [])
-                    ):
+                    trigger_gt = "＞" in body
+                    trigger_kw = any(k in body for k in keywords) if keywords else False
+                    print(f"   DEBUG: トリガー判定: '＞'={trigger_gt}, キーワード={trigger_kw}")
+
+                    if trigger_gt or trigger_kw:
                         target_char = self.cm.get_character("meta_gm")
                         enriched = (
                             f"{self.ctx.get_context_summary()}\n\n"
