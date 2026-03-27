@@ -482,6 +482,7 @@ class CCFoliaConnector:
         print(f"   DEBUG: 既存メッセージ数={len(self._known_messages)}")
 
         poll_count = 0
+        zero_count = 0  # メッセージ0件が連続した回数
         while self._running:
             try:
                 current = self._get_chat_messages()
@@ -489,6 +490,18 @@ class CCFoliaConnector:
                 print(f"   DEBUG: メッセージ取得エラー: {e}")
                 time.sleep(self.poll_interval)
                 continue
+
+            # メッセージが0件の場合の警告（最初の数回だけ表示）
+            if len(current) == 0:
+                zero_count += 1
+                if zero_count <= 3:
+                    print(f"   ⚠ メッセージが0件です(連続{zero_count}回)。"
+                          "チャットに既存メッセージがあるか確認してください。")
+                elif zero_count == 10:
+                    print("   ⚠ メッセージ取得が継続して0件です。"
+                          "CCFoliaのDOM構造が変更されている可能性があります。")
+            else:
+                zero_count = 0
 
             new_msgs = [
                 m for m in current if f"{m['speaker']}|{m['body']}" not in self._known_messages
