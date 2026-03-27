@@ -17,11 +17,20 @@ import re
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
+# stdout をバッファリングなしにする（クラッシュ時にもログが表示されるように）
+try:
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+except Exception:
+    pass
+
 # 同階層モジュール + リポジトリルートをパスに追加
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_CORE_DIR = Path(__file__).resolve().parent
+_ROOT_DIR = _CORE_DIR.parent
+sys.path.insert(0, str(_CORE_DIR))
+sys.path.insert(0, str(_ROOT_DIR))
 from ccfolia_map_controller import MAP_TOOLS, CCFoliaMapController, execute_map_tool
 from character_manager import CharacterManager
 from knowledge_manager import KnowledgeManager
@@ -197,11 +206,12 @@ class CCFoliaConnector:
         self.headless = headless
 
         self.lm_client = LMClient()
-        self.cm = CharacterManager()
-        self.pm = PromptManager()
+        # 設定ファイルは常にリポジトリルート基準の絶対パスで解決する
+        self.cm = CharacterManager(str(_ROOT_DIR / "configs" / "characters.json"))
+        self.pm = PromptManager(str(_ROOT_DIR / "configs" / "prompts.json"))
         self.detector = CharacterDetector(self.cm, default_id=default_character_id)
         self.ctx = SessionContext()
-        self.sm = SessionManager(Path(__file__).parent.parent)
+        self.sm = SessionManager(_ROOT_DIR)
         self.world_setting = self._load_world_setting()
 
         # VTTアダプター（Playwright ベース）
@@ -599,6 +609,17 @@ class CCFoliaConnector:
 
     def start(self) -> None:
         print("=" * 50 + "\nタクティカル祓魔師 CCFolia連携\n" + "=" * 50)
+
+        # 設定ファイルの読み込み状況を表示
+        print(f"   キャラクター数: {self.cm.get_character_count()}")
+        print(f"   テンプレート数: {len(self.pm.templates)}")
+        if self.cm.get_character_count() == 0:
+            print("   ⚠ characters.json が読み込めていません！")
+            print(f"     パス: {self.cm.config_path}")
+        meta_gm = self.cm.get_character("meta_gm")
+        if not meta_gm:
+            print("   ⚠ meta_gm キャラクターが見つかりません！")
+
         self.sm.start_new_session("CCFoliaSession")
         self._init_adapter()
         self._init_knowledge()
@@ -623,4 +644,12 @@ if __name__ == "__main__":
     parser.add_argument("--room", required=True)
     parser.add_argument("--default", default="meta_gm")
     args = parser.parse_args()
-    CCFoliaConnector(args.room, args.default).start()
+    try:
+        CCFoliaConnector(args.room, args.default).start()
+    except Exception:
+        print("\n" + "=" * 50)
+        print("❌ 致命的エラーが発生しました:")
+        print("=" * 50)
+        traceback.print_exc()
+        print("\n上記のエラー内容を確認してください。")
+        input("Enterキーで終了...")  # ウィンドウが即閉じるのを防止
