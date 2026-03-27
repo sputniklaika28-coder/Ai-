@@ -531,6 +531,22 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     return t.trim();
                 }
 
+                function shouldSkip(speaker, body) {
+                    if (!speaker) return true;
+                    // _SKIP は部分一致（タイムスタンプ付きでもフィルタ）
+                    for (const s of _SKIP) {
+                        if (speaker === s || speaker.startsWith(s + " ")) return true;
+                    }
+                    if (speaker.includes("[AI]")) return true;
+                    if (body && (body.startsWith("[AI]") || body.startsWith("[AI] "))) return true;
+                    return false;
+                }
+
+                // speaker からタイムスタンプを除去
+                function cleanSpeaker(s) {
+                    return s.replace(/\s*-\s*今日\s*\d{1,2}:\d{2}.*$/, "").trim();
+                }
+
                 function tryParse(el) {
                     const text = (el.textContent || "").trim();
                     if (!text) return null;
@@ -539,10 +555,9 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     const primary = el.querySelector('[class*="MuiListItemText-primary"]');
                     const secondary = el.querySelector('[class*="MuiListItemText-secondary"]');
                     if (primary && secondary) {
-                        // primaryの直接テキストノードのみ取得（spanのタイムスタンプを除外）
-                        const speaker = directText(primary);
+                        const speaker = cleanSpeaker(directText(primary));
                         const body = (secondary.textContent || "").trim();
-                        if (speaker && body && !_SKIP.has(speaker) && !speaker.includes("[AI]")) {
+                        if (speaker && body && !shouldSkip(speaker, body)) {
                             return {speaker: speaker, body: body};
                         }
                     }
@@ -550,8 +565,7 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     // 戦略A: 子要素からspeaker/bodyを分離（子が2つ以上ある場合）
                     const children = el.children;
                     if (children.length >= 2) {
-                        // 最初の子要素の直接テキストのみ（タイムスタンプspan除外）
-                        const firstText = directText(children[0]);
+                        const firstText = cleanSpeaker(directText(children[0]));
                         const restParts = [];
                         for (let i = 1; i < children.length; i++) {
                             const t = (children[i].textContent || "").trim();
@@ -559,7 +573,7 @@ class CCFoliaAdapter(BaseVTTAdapter):
                         }
                         if (firstText && restParts.length > 0) {
                             const body = restParts.join(" ");
-                            if (!_SKIP.has(firstText) && !firstText.includes("[AI]") && body.length > 0) {
+                            if (!shouldSkip(firstText, body) && body.length > 0) {
                                 return {speaker: firstText, body: body};
                             }
                         }
@@ -568,10 +582,9 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     // 戦略B: 改行区切りでspeaker/bodyを分離
                     const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
                     if (lines.length >= 2) {
-                        // タイムスタンプ除去（「名前 - 今日 HH:MM」パターン）
-                        const speaker = lines[0].replace(/\s*-\s*今日\s*\d{1,2}:\d{2}.*$/, "").trim();
+                        const speaker = cleanSpeaker(lines[0]);
                         const body = lines.slice(1).join(" ");
-                        if (speaker && !_SKIP.has(speaker) && !speaker.includes("[AI]") && body.length > 0) {
+                        if (speaker && !shouldSkip(speaker, body) && body.length > 0) {
                             return {speaker: speaker, body: body};
                         }
                     }
@@ -579,9 +592,9 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     // 戦略C: 「名前: 本文」形式
                     const colonMatch = text.match(/^(.+?)[：:]\s*(.+)$/s);
                     if (colonMatch) {
-                        const speaker = colonMatch[1].trim();
+                        const speaker = cleanSpeaker(colonMatch[1].trim());
                         const body = colonMatch[2].trim();
-                        if (!_SKIP.has(speaker) && !speaker.includes("[AI]") && body.length > 0) {
+                        if (!shouldSkip(speaker, body) && body.length > 0) {
                             return {speaker: speaker, body: body};
                         }
                     }
@@ -658,6 +671,23 @@ class CCFoliaAdapter(BaseVTTAdapter):
     def _parse_chat_element(el) -> dict | None:
         """単一のチャット要素からspeakerとbodyを抽出する。"""
         _SKIP = {"メイン", "情報", "noname"}
+        _TS_RE = re.compile(r'\s*-\s*今日\s*\d{1,2}:\d{2}.*$')
+
+        def _should_skip(speaker: str, body: str) -> bool:
+            if not speaker:
+                return True
+            for s in _SKIP:
+                if speaker == s or speaker.startswith(s + " "):
+                    return True
+            if "[AI]" in speaker:
+                return True
+            if body.startswith("[AI]") or body.startswith("[AI] "):
+                return True
+            return False
+
+        def _clean(s: str) -> str:
+            return _TS_RE.sub("", s).strip()
+
         try:
             text = el.text_content() or ""
             text = text.strip()
@@ -667,28 +697,29 @@ class CCFoliaAdapter(BaseVTTAdapter):
             # 戦略A: 改行区切りで2行以上
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             if len(lines) >= 2:
-                speaker, body = lines[0], " ".join(lines[1:])
-                if speaker not in _SKIP and "[AI]" not in speaker:
+                speaker = _clean(lines[0])
+                body = " ".join(lines[1:])
+                if not _should_skip(speaker, body):
                     return {"speaker": speaker, "body": body}
 
             # 戦略B: 子要素から分離
             children = el.query_selector_all(":scope > *")
             if len(children) >= 2:
-                first = (children[0].text_content() or "").strip()
+                first = _clean((children[0].text_content() or "").strip())
                 rest = " ".join(
                     (c.text_content() or "").strip()
                     for c in children[1:]
                     if (c.text_content() or "").strip()
                 )
-                if first and rest and first not in _SKIP and "[AI]" not in first:
+                if first and rest and not _should_skip(first, rest):
                     return {"speaker": first, "body": rest}
 
             # 戦略C: 「名前：本文」形式
-            import re as _re
-            m = _re.match(r'^(.+?)[：:]\s*(.+)$', text, _re.DOTALL)
+            m = re.match(r'^(.+?)[：:]\s*(.+)$', text, re.DOTALL)
             if m:
-                speaker, body = m.group(1).strip(), m.group(2).strip()
-                if speaker not in _SKIP and "[AI]" not in speaker and body:
+                speaker = _clean(m.group(1).strip())
+                body = m.group(2).strip()
+                if not _should_skip(speaker, body) and body:
                     return {"speaker": speaker, "body": body}
         except Exception:
             pass
