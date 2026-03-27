@@ -346,39 +346,32 @@ class CCFoliaAdapter(BaseVTTAdapter):
             self.page.wait_for_timeout(200)
 
             # 駒選択（キャラクター切り替え）
-            try:
-                piece_select = self.page.query_selector(_PIECE_SELECT)
-                if piece_select:
-                    piece_select.click()
-                    self.page.wait_for_timeout(300)
-                    items = self.page.query_selector_all(_PIECE_ITEM)
-                    for item in items:
-                        item_text = item.text_content() or ""
-                        if character_name in item_text:
-                            item.click()
-                            self.page.wait_for_timeout(200)
-                            break
-                    else:
-                        self.page.keyboard.press("Escape")
-            except Exception:
-                pass
-
+            self._try_select_character(character_name)
             self.page.wait_for_timeout(200)
 
-            # チャット入力欄を取得
-            inputs = self.page.query_selector_all(_CHAT_INPUT)
-            if not inputs:
+            # チャット入力欄を取得（可視の textarea を優先）
+            input_el = self._find_chat_input()
+            if not input_el:
                 logger.error("チャット入力欄が見つかりません")
                 return False
 
-            # 名前欄があれば設定
-            if len(inputs) >= 2:
-                inputs[0].click()
-                inputs[0].press("Control+a")
-                inputs[0].fill(character_name)
+            # 名前欄の設定（最初のtextarea が名前欄の場合）
+            all_inputs = self.page.query_selector_all("textarea:visible")
+            if len(all_inputs) >= 2:
+                try:
+                    all_inputs[0].click(timeout=3000)
+                    all_inputs[0].press("Control+a")
+                    all_inputs[0].fill(character_name)
+                    input_el = all_inputs[-1]
+                except Exception:
+                    pass
 
-            input_el = inputs[-1]
-            input_el.click()
+            # 入力欄にフォーカス
+            try:
+                input_el.click(timeout=5000)
+            except Exception:
+                # click が失敗したら focus() で代替
+                input_el.focus()
             input_el.press("Control+a")
             input_el.press("Backspace")
             self.page.wait_for_timeout(100)
@@ -399,6 +392,79 @@ class CCFoliaAdapter(BaseVTTAdapter):
         except Exception as e:
             logger.error("チャット送信エラー: %s", e)
             return False
+
+    def _find_chat_input(self):
+        """可視のチャット入力 textarea を見つける。"""
+        # 可視の textarea を探す
+        visible = self.page.query_selector_all("textarea:visible")
+        if visible:
+            return visible[-1]
+
+        # フォールバック: 全 textarea から可視のものを探す
+        all_ta = self.page.query_selector_all("textarea")
+        for ta in reversed(all_ta):
+            try:
+                if ta.is_visible():
+                    return ta
+            except Exception:
+                continue
+
+        # 最終フォールバック: JS で表示状態を確認
+        ta = self.page.evaluate_handle("""() => {
+            const tas = document.querySelectorAll('textarea');
+            for (let i = tas.length - 1; i >= 0; i--) {
+                const rect = tas[i].getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) return tas[i];
+            }
+            return null;
+        }""")
+        if ta:
+            return ta.as_element()
+        return None
+
+    def _try_select_character(self, character_name: str) -> None:
+        """駒選択UIでキャラクターを切り替える（失敗しても続行）。"""
+        try:
+            # より具体的なセレクタで駒選択UIを探す
+            piece_selectors = [
+                "[class*='MuiSelect']",
+                "div[role='button'][class*='MuiBox']",
+                "[class*='MuiBox'][aria-haspopup]",
+                _PIECE_SELECT,
+            ]
+            piece_select = None
+            for sel in piece_selectors:
+                candidates = self.page.query_selector_all(sel)
+                for c in candidates:
+                    try:
+                        if c.is_visible():
+                            piece_select = c
+                            break
+                    except Exception:
+                        continue
+                if piece_select:
+                    break
+
+            if not piece_select:
+                return
+
+            piece_select.click(timeout=3000)
+            self.page.wait_for_timeout(300)
+            items = self.page.query_selector_all(_PIECE_ITEM)
+            for item in items:
+                item_text = item.text_content() or ""
+                if character_name in item_text:
+                    item.click(timeout=3000)
+                    self.page.wait_for_timeout(200)
+                    return
+            # 見つからなかった場合はメニューを閉じる
+            self.page.keyboard.press("Escape")
+        except Exception as e:
+            logger.debug("駒選択スキップ: %s", e)
+            try:
+                self.page.keyboard.press("Escape")
+            except Exception:
+                pass
 
     def get_chat_messages(self) -> list[dict]:
         """チャットメッセージ一覧を取得する。"""
@@ -450,18 +516,42 @@ class CCFoliaAdapter(BaseVTTAdapter):
         チャットログ領域を自動検出し、各メッセージから発言者と本文を取得する。
         """
         try:
-            raw = self.page.evaluate("""() => {
+            raw = self.page.evaluate(r"""() => {
                 const results = [];
                 const _SKIP = new Set(["メイン", "情報", "noname"]);
+
+                // 要素の直接テキスト（子要素のテキストを除外）を取得
+                function directText(el) {
+                    let t = "";
+                    for (const node of el.childNodes) {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            t += node.textContent;
+                        }
+                    }
+                    return t.trim();
+                }
 
                 function tryParse(el) {
                     const text = (el.textContent || "").trim();
                     if (!text) return null;
 
+                    // 戦略0: MuiListItemText-primary / secondary 構造（CCFolia実構造）
+                    const primary = el.querySelector('[class*="MuiListItemText-primary"]');
+                    const secondary = el.querySelector('[class*="MuiListItemText-secondary"]');
+                    if (primary && secondary) {
+                        // primaryの直接テキストノードのみ取得（spanのタイムスタンプを除外）
+                        const speaker = directText(primary);
+                        const body = (secondary.textContent || "").trim();
+                        if (speaker && body && !_SKIP.has(speaker) && !speaker.includes("[AI]")) {
+                            return {speaker: speaker, body: body};
+                        }
+                    }
+
                     // 戦略A: 子要素からspeaker/bodyを分離（子が2つ以上ある場合）
                     const children = el.children;
                     if (children.length >= 2) {
-                        const firstText = (children[0].textContent || "").trim();
+                        // 最初の子要素の直接テキストのみ（タイムスタンプspan除外）
+                        const firstText = directText(children[0]);
                         const restParts = [];
                         for (let i = 1; i < children.length; i++) {
                             const t = (children[i].textContent || "").trim();
@@ -476,11 +566,12 @@ class CCFoliaAdapter(BaseVTTAdapter):
                     }
 
                     // 戦略B: 改行区切りでspeaker/bodyを分離
-                    const lines = text.split(/\\n/).map(l => l.trim()).filter(Boolean);
+                    const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
                     if (lines.length >= 2) {
-                        const speaker = lines[0];
+                        // タイムスタンプ除去（「名前 - 今日 HH:MM」パターン）
+                        const speaker = lines[0].replace(/\s*-\s*今日\s*\d{1,2}:\d{2}.*$/, "").trim();
                         const body = lines.slice(1).join(" ");
-                        if (!_SKIP.has(speaker) && !speaker.includes("[AI]") && body.length > 0) {
+                        if (speaker && !_SKIP.has(speaker) && !speaker.includes("[AI]") && body.length > 0) {
                             return {speaker: speaker, body: body};
                         }
                     }
