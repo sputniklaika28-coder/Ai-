@@ -104,8 +104,202 @@ KNOWLEDGE_TOOLS: list[dict] = [
     },
 ]
 
+# ==========================================
+# Phase 2: アセット・Vision ツール定義
+# ==========================================
+
+ASSET_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "upload_asset",
+            "description": "ローカルファイルをCCFoliaにアップロードする（画像・BGM）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "アップロードするファイルパス"},
+                    "asset_type": {
+                        "type": "string",
+                        "enum": ["background", "token", "bgm"],
+                        "description": "アセット種別",
+                    },
+                },
+                "required": ["file_path", "asset_type"],
+            },
+        },
+    },
+]
+
+VISION_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_board_vision",
+            "description": "VLMで盤面を視覚的に解析し、Canvas上の駒や地形を検出する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "解析の焦点（省略可）"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "place_piece_at_location",
+            "description": "自然言語で指定した位置にコマを配置する（VLMで座標を特定）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "配置位置の説明（例: 十字路、部屋の中央）"},
+                    "character_json": {
+                        "type": "object",
+                        "description": "CCFolia形式のキャラクターデータ",
+                    },
+                },
+                "required": ["description", "character_json"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_board_scene",
+            "description": "VLMで現在の盤面状態を自然言語で説明する",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
+ROOM_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "build_room",
+            "description": "構造化定義からCCFoliaルームを自動構築する（背景・BGM・キャラクター一括配置）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "room_definition": {
+                        "type": "object",
+                        "description": "ルーム定義（name, background_image, bgm, characters）",
+                    },
+                },
+                "required": ["room_definition"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_room_background",
+            "description": "現在のルームの背景画像をアップロードして設定する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "背景画像のローカルパス"},
+                },
+                "required": ["image_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_room_bgm",
+            "description": "ルームにBGMを追加する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "音声ファイルパス"},
+                    "name": {"type": "string", "description": "BGM名"},
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "place_room_character",
+            "description": "ルームにキャラクターを配置する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "キャラクター名"},
+                    "position": {"type": "string", "description": "配置位置の説明（自然言語）"},
+                    "grid_x": {"type": "integer", "description": "グリッドX座標（省略可）"},
+                    "grid_y": {"type": "integer", "description": "グリッドY座標（省略可）"},
+                    "ccfolia_data": {"type": "object", "description": "CCFolia形式キャラクターデータ"},
+                },
+                "required": ["name", "ccfolia_data"],
+            },
+        },
+    },
+]
+
+COPILOT_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "transition_scene",
+            "description": "登録済みシーンに遷移する（背景・BGM・キャラクター一括変更）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scene_name": {"type": "string", "description": "遷移先のシーン名"},
+                },
+                "required": ["scene_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_scenes",
+            "description": "登録済みシーンの一覧を取得する",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_scene",
+            "description": "新しいシーンを登録する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scene_definition": {
+                        "type": "object",
+                        "description": "シーン定義（name, background_image, bgm, characters）",
+                    },
+                },
+                "required": ["scene_definition"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_copilot_mode",
+            "description": "コパイロットのモードを切り替える（auto: 自動実行, assist: 提案のみ）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["auto", "assist"]},
+                },
+                "required": ["mode"],
+            },
+        },
+    },
+]
+
 # 全ツール結合
-ALL_TOOLS: list[dict] = AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS
+ALL_TOOLS: list[dict] = (
+    AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS
+    + ASSET_TOOLS + VISION_TOOLS + ROOM_TOOLS + COPILOT_TOOLS
+)
 
 
 # ==========================================
@@ -229,6 +423,9 @@ class CCFoliaConnector:
         self._running = False
         self._stdin_queue: queue.Queue[dict] = queue.Queue()
 
+        # セッション・コパイロット（Phase 4）
+        self._copilot: object | None = None
+
     # ──────────────────────────────────────────
     # 初期化 / 終了
     # ──────────────────────────────────────────
@@ -259,6 +456,20 @@ class CCFoliaConnector:
         self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
         mode = "Browser Use" if self._use_browser_use else "Playwright"
         print(f"✓ CCFoliaに接続 ({mode}): {self.room_url}")
+
+    def _init_copilot(self) -> None:
+        """SessionCoPilot を初期化する。"""
+        try:
+            from session_copilot import SessionCoPilot
+            self._copilot = SessionCoPilot(adapter=self.adapter, mode="auto")
+            # シーン定義ファイルがあれば読み込む
+            scenes_path = self.sm.configs_dir / "scenes.json"
+            if scenes_path.exists():
+                count = self._copilot.load_scenes_from_file(str(scenes_path))
+                print(f"✓ シーン定義を {count} 件読み込みました")
+            logger.info("SessionCoPilot 初期化完了")
+        except Exception as e:
+            logger.warning("SessionCoPilot 初期化エラー: %s", e)
 
     def _init_knowledge(self) -> None:
         """KnowledgeManager を初期化し、世界観データを取り込む。"""
@@ -352,6 +563,118 @@ class CCFoliaConnector:
                 results = self.knowledge_manager.search_web(tool_args.get("query", ""))
                 return False, json.dumps(results, ensure_ascii=False)
             return False, json.dumps({"error": "KnowledgeManager が未初期化です"})
+
+        # アセットアップロードツール
+        if tool_name == "upload_asset" and self.adapter and self._use_browser_use:
+            try:
+                url = self.adapter.upload_asset(
+                    tool_args.get("file_path", ""),
+                    tool_args.get("asset_type", "background"),
+                )
+                return False, json.dumps({"url": url or "", "ok": url is not None})
+            except NotImplementedError:
+                return False, json.dumps({"error": "このアダプターは upload_asset に対応していません"})
+
+        # VLM Vision ツール
+        if tool_name == "analyze_board_vision" and self.adapter and self._use_browser_use:
+            try:
+                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
+                pieces = vision.analyze_board(tool_args.get("query", ""))
+                return False, json.dumps(pieces, ensure_ascii=False, default=str)
+            except (NotImplementedError, AttributeError):
+                return False, json.dumps({"error": "Vision 機能が利用できません"})
+
+        if tool_name == "place_piece_at_location" and self.adapter and self._use_browser_use:
+            try:
+                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
+                ok = vision.place_piece_at_visual_location(
+                    tool_args.get("description", ""),
+                    tool_args.get("character_json", {}),
+                )
+                return False, json.dumps({"ok": ok})
+            except (NotImplementedError, AttributeError):
+                return False, json.dumps({"error": "Vision 機能が利用できません"})
+
+        if tool_name == "describe_board_scene" and self.adapter and self._use_browser_use:
+            try:
+                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
+                desc = vision.describe_scene()
+                return False, json.dumps({"description": desc})
+            except (NotImplementedError, AttributeError):
+                return False, json.dumps({"error": "Vision 機能が利用できません"})
+
+        # ルーム構築ツール
+        if tool_name == "build_room" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import RoomBuilder, RoomDefinition
+                builder = RoomBuilder(adapter=self.adapter)
+                defn = RoomDefinition.from_dict(tool_args.get("room_definition", {}))
+                results = builder.build_room(defn)
+                summary = [
+                    {"step": r.step, "success": r.success, "detail": r.detail, "error": r.error}
+                    for r in results
+                ]
+                return False, json.dumps({"results": summary}, ensure_ascii=False)
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "set_room_background" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import RoomBuilder
+                builder = RoomBuilder(adapter=self.adapter)
+                r = builder.set_background(tool_args.get("image_path", ""))
+                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "add_room_bgm" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import RoomBuilder
+                builder = RoomBuilder(adapter=self.adapter)
+                r = builder.add_bgm(
+                    tool_args.get("file_path", ""), tool_args.get("name", ""),
+                )
+                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "place_room_character" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import CharacterPlacement, RoomBuilder
+                builder = RoomBuilder(adapter=self.adapter)
+                char = CharacterPlacement(
+                    name=tool_args.get("name", ""),
+                    position=tool_args.get("position", ""),
+                    grid_x=tool_args.get("grid_x"),
+                    grid_y=tool_args.get("grid_y"),
+                    ccfolia_data=tool_args.get("ccfolia_data", {}),
+                )
+                r = builder.place_character(char)
+                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        # コパイロットツール
+        if tool_name == "transition_scene" and self._copilot:
+            results = self._copilot.transition_to(tool_args.get("scene_name", ""))
+            return False, json.dumps({"results": results}, ensure_ascii=False)
+
+        if tool_name == "list_scenes" and self._copilot:
+            scenes = self._copilot.list_scenes()
+            return False, json.dumps({"scenes": scenes}, ensure_ascii=False)
+
+        if tool_name == "register_scene" and self._copilot:
+            try:
+                from session_copilot import SceneDefinition
+                defn = SceneDefinition.from_dict(tool_args.get("scene_definition", {}))
+                self._copilot.register_scene(defn)
+                return False, json.dumps({"ok": True, "scene": defn.name})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "set_copilot_mode" and self._copilot:
+            self._copilot.mode = tool_args.get("mode", "auto")
+            return False, json.dumps({"ok": True, "mode": self._copilot.mode})
 
         # マップ操作ツール
         if self.map_ctrl:
@@ -555,6 +878,16 @@ class CCFoliaConnector:
                     self.ctx.add_message(speaker, body)
                     print(f"\n📨 新着: [{speaker}] {body[:40]}")
 
+                    # コパイロットのイベントルール処理
+                    if self._copilot:
+                        try:
+                            actions = self._copilot.process_message(speaker, body)
+                            for a in actions:
+                                status = "✓" if a.success else "✗"
+                                print(f"   🤖 [{status}] ルール '{a.rule_name}': {a.detail or a.error}")
+                        except Exception as e:
+                            logger.error("コパイロット処理エラー: %s", e)
+
                     trigger_gt = "＞" in body
                     trigger_kw = any(k in body for k in keywords) if keywords else False
                     print(f"   DEBUG: トリガー判定: '＞'={trigger_gt}, キーワード={trigger_kw}")
@@ -648,6 +981,7 @@ class CCFoliaConnector:
         self.sm.start_new_session("CCFoliaSession")
         self._init_adapter()
         self._init_knowledge()
+        self._init_copilot()
         self._running = True
 
         # stdin監視だけ別スレッド（Playwright を触らない）

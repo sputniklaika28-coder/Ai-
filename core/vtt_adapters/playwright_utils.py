@@ -103,3 +103,146 @@ def spawn_piece_clipboard(page: object, character_json: dict) -> bool:
     except Exception as e:
         logger.error("駒配置エラー: %s", e)
         return False
+
+
+# ──────────────────────────────────────────
+# ファイルアップロードヘルパー
+# ──────────────────────────────────────────
+
+
+def find_file_input(page: object) -> object | None:
+    """ページ上の input[type="file"] を検索する（hidden 含む）。
+
+    Args:
+        page: Playwright Page オブジェクト。
+
+    Returns:
+        見つかった ElementHandle、なければ None。
+    """
+    try:
+        el = page.query_selector('input[type="file"]')  # type: ignore[union-attr]
+        return el
+    except Exception:
+        return None
+
+
+def set_file_via_input(
+    page: object, file_path: str, selector: str = 'input[type="file"]'
+) -> bool:
+    """Playwright の set_input_files でファイルを注入する。
+
+    OS のファイルダイアログをバイパスし、直接ファイルパスを設定する。
+
+    Args:
+        page: Playwright Page オブジェクト。
+        file_path: アップロードするファイルの絶対パス。
+        selector: ファイル入力要素の CSS セレクタ。
+
+    Returns:
+        成功した場合 True。
+    """
+    try:
+        page.set_input_files(selector, file_path)  # type: ignore[union-attr]
+        logger.info("ファイルを注入: %s", file_path)
+        return True
+    except Exception as e:
+        logger.error("ファイル注入エラー: %s", e)
+        return False
+
+
+# ──────────────────────────────────────────
+# Canvas スクリーンショット・座標ヘルパー
+# ──────────────────────────────────────────
+
+_CANVAS_BOUNDS_JS = """() => {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) {
+        // canvas がなければメインのボード領域を探す
+        const board = document.querySelector(
+            '[class*="board"], [class*="field"], [class*="map"], .movable'
+        );
+        if (board) {
+            const r = board.closest('[style*="transform"]')?.getBoundingClientRect()
+                      || board.getBoundingClientRect();
+            return {x: r.x, y: r.y, width: r.width, height: r.height};
+        }
+        return null;
+    }
+    const r = canvas.getBoundingClientRect();
+    return {x: r.x, y: r.y, width: r.width, height: r.height};
+}"""
+
+
+def get_canvas_bounds(page: object) -> dict | None:
+    """Canvas / ボード要素の境界矩形を取得する。
+
+    Args:
+        page: Playwright Page オブジェクト。
+
+    Returns:
+        {x, y, width, height} 辞書、見つからなければ None。
+    """
+    try:
+        return page.evaluate(_CANVAS_BOUNDS_JS)  # type: ignore[union-attr]
+    except Exception:
+        return None
+
+
+def clip_screenshot(page: object, bounds: dict) -> bytes | None:
+    """指定領域だけをスクリーンショットする。
+
+    Args:
+        page: Playwright Page オブジェクト。
+        bounds: {x, y, width, height} 辞書。
+
+    Returns:
+        PNG 画像のバイト列、失敗時は None。
+    """
+    try:
+        return page.screenshot(  # type: ignore[union-attr]
+            clip={
+                "x": bounds["x"],
+                "y": bounds["y"],
+                "width": bounds["width"],
+                "height": bounds["height"],
+            }
+        )
+    except Exception as e:
+        logger.error("クリップスクリーンショットエラー: %s", e)
+        return None
+
+
+def mouse_drag(
+    page: object,
+    from_xy: tuple[int, int],
+    to_xy: tuple[int, int],
+    steps: int = 10,
+) -> bool:
+    """ステップ分割のスムーズなマウスドラッグを実行する。
+
+    Canvas 要素のように JS イベントディスパッチが効かない領域で、
+    リアルなマウスイベントを発生させる。
+
+    Args:
+        page: Playwright Page オブジェクト。
+        from_xy: ドラッグ開始座標 (x, y)。
+        to_xy: ドラッグ終了座標 (x, y)。
+        steps: 中間ステップ数（多いほど滑らか）。
+
+    Returns:
+        成功した場合 True。
+    """
+    try:
+        mouse = page.mouse  # type: ignore[union-attr]
+        mouse.move(from_xy[0], from_xy[1])
+        mouse.down()
+        for i in range(1, steps + 1):
+            x = from_xy[0] + (to_xy[0] - from_xy[0]) * i / steps
+            y = from_xy[1] + (to_xy[1] - from_xy[1]) * i / steps
+            mouse.move(x, y)
+        mouse.up()
+        logger.info("ドラッグ完了: (%d,%d) → (%d,%d)", *from_xy, *to_xy)
+        return True
+    except Exception as e:
+        logger.error("ドラッグエラー: %s", e)
+        return False
