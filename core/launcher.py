@@ -12,7 +12,7 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, simpledialog, ttk
+from tkinter import messagebox, scrolledtext, ttk
 
 import requests
 
@@ -343,7 +343,7 @@ class LauncherTab(ttk.Frame):
 
 
 # ==========================================
-# タブ1: キャラクターメーカー
+# タブ1: キャラクターメーカー (簡素化版)
 # ==========================================
 class VTTCharMakerTab(ttk.Frame):
     def __init__(self, parent):
@@ -359,158 +359,46 @@ class VTTCharMakerTab(ttk.Frame):
         self._refresh_saved_list()
 
     def _init_vars(self):
-        self.vars_prof = {
-            "name": tk.StringVar(),
-            "pl_name": tk.StringVar(),
-            "gender": tk.StringVar(),
-            "alias": tk.StringVar(),
-            "race": tk.StringVar(),
-            "affiliation": tk.StringVar(),
-            "department": tk.StringVar(),
-            "rank": tk.StringVar(),
-            "origin": tk.StringVar(),
-            "age": tk.StringVar(),
-            "title": tk.StringVar(),
-            "attack_style": tk.StringVar(),
-            "education": tk.StringVar(),
-        }
-        self.vars_main_stats = {}
-        for stat in ["body", "soul", "skill", "magic"]:
-            self.vars_main_stats[stat] = {
-                "init": tk.IntVar(value=3),
-                "mod": tk.IntVar(value=0),
-                "skill": tk.IntVar(value=0),
-                "growth": tk.IntVar(value=0),
-                "final": tk.IntVar(value=3),
-            }
-            for k in ["init", "mod", "skill", "growth"]:
-                self.vars_main_stats[stat][k].trace_add(
-                    "write", lambda *args, s=stat: self._calc_main_stat(s)
-                )
-        self.vars_sub_stats = {}
-        for stat in ["hp", "sp", "armor", "mobility"]:
-            self.vars_sub_stats[stat] = {
-                "init": tk.IntVar(value=10 if stat in ["hp", "sp"] else 0),
-                "cloak": tk.IntVar(value=0),
-                "skill": tk.IntVar(value=0),
-                "mod": tk.IntVar(value=0),
-                "final": tk.IntVar(value=10 if stat in ["hp", "sp"] else 0),
-            }
-            for k in ["init", "cloak", "skill", "mod"]:
-                self.vars_sub_stats[stat][k].trace_add(
-                    "write", lambda *args, s=stat: self._calc_sub_stat(s)
-                )
-
-        self.vars_equip = {
-            "cloak_name": tk.StringVar(value="標準狩衣"),
-            "weapon_name": tk.StringVar(value="支給祭具"),
-            "weapon2_name": tk.StringVar(value=""),
-        }
-        self.vars_combat_mods = {
-            "melee": tk.IntVar(value=0),
-            "ranged": tk.IntVar(value=0),
-            "anti_body": tk.IntVar(value=0),
-            "anti_skill": tk.IntVar(value=0),
-            "anti_soul": tk.IntVar(value=0),
-            "anti_magic": tk.IntVar(value=0),
-        }
-
-        self.vars_skills = []
-        for _ in range(8):
-            self.vars_skills.append(
-                {
-                    "name": tk.StringVar(),
-                    "cost": tk.StringVar(),
-                    "condition": tk.StringVar(),
-                    "effect": tk.StringVar(),
-                }
-            )
-
-        self.vars_inventory = []
-        for i in range(13):
-            def_name = ""
-            if i == 0:
-                def_name = "形代"
-            elif i == 1:
-                def_name = "祓串"
-            elif i == 2:
-                def_name = "注連鋼縄"
-            self.vars_inventory.append(
-                {
-                    "name": tk.StringVar(value=def_name),
-                    "type": tk.StringVar(value="支給" if i < 3 else ""),
-                    "count": tk.IntVar(value=7 if i == 0 or i == 1 else (21 if i == 2 else 0)),
-                }
-            )
-
-        self.vars_accessories = []
-        for _ in range(8):
-            self.vars_accessories.append({"name": tk.StringVar(), "memo": tk.StringVar()})
-
-        self.vars_lore = {
-            "real_name": tk.StringVar(value="対人呪殺を防ぐため非公開"),
-            "birthday": tk.StringVar(),
-            "height": tk.StringVar(),
-            "weight": tk.StringVar(),
-            "blood_type": tk.StringVar(),
-            "religion": tk.StringVar(),
-            "service_years": tk.StringVar(),
-            "innate_type": tk.StringVar(value="生得(ナチュラル)祓魔師"),
-            "apt_weapon": tk.StringVar(value="なし"),
-            "apt_test": tk.StringVar(value="前線部隊"),
-            "apt_support": tk.StringVar(value="なし"),
-            "eval_body": tk.StringVar(value="C"),
-            "eval_soul": tk.StringVar(value="C"),
-            "eval_output": tk.StringVar(value="C"),
-            "eval_resist": tk.StringVar(value="C"),
-            "eval_tool": tk.StringVar(value="C"),
-            "curse_coeff": tk.StringVar(value="任務に支障なし"),
-            "impairment": tk.StringVar(value="障骸なし"),
-            "examiner_name": tk.StringVar(value="黒服の神祇官"),
-        }
-        self.var_use_extra_rules = tk.BooleanVar(value=True)
-
-    def _calc_main_stat(self, stat):
-        try:
-            total = sum(
-                self.vars_main_stats[stat][k].get() for k in ["init", "mod", "skill", "growth"]
-            )
-            self.vars_main_stats[stat]["final"].set(total)
-        except tk.TclError:
-            pass
-
-    def _calc_sub_stat(self, stat):
-        try:
-            total = sum(
-                self.vars_sub_stats[stat][k].get() for k in ["init", "cloak", "skill", "mod"]
-            )
-            self.vars_sub_stats[stat]["final"].set(total)
-        except tk.TclError:
-            pass
+        self._last_json_raw = {}
+        self.var_name = tk.StringVar(value="名無し")
+        self.var_alias = tk.StringVar(value="")
+        # 主能力値
+        self.var_body = tk.IntVar(value=3)
+        self.var_soul = tk.IntVar(value=3)
+        self.var_skill = tk.IntVar(value=3)
+        self.var_magic = tk.IntVar(value=3)
+        # 副能力値
+        self.var_hp = tk.IntVar(value=10)
+        self.var_sp = tk.IntVar(value=10)
+        self.var_evasion = tk.IntVar(value=2)
+        self.var_mobility = tk.IntVar(value=2)
+        self.var_armor = tk.IntVar(value=0)
+        # アイテム
+        self.var_katashiro = tk.IntVar(value=1)
+        self.var_haraegushi = tk.IntVar(value=0)
+        self.var_shimenawa = tk.IntVar(value=0)
+        self.var_juryudan = tk.IntVar(value=0)
+        self.var_ireikigu = tk.IntVar(value=0)
+        self.var_meifuku = tk.IntVar(value=0)
+        self.var_jutsuyen = tk.IntVar(value=0)
 
     def _build_ui(self):
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True)
+        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        left = ttk.Frame(paned, padding=(0, 0, 10, 0))
+        # --- 左ペイン: AI生成 & 保存リスト ---
+        left = ttk.Frame(paned)
         paned.add(left, weight=1)
 
-        f_ai = ttk.LabelFrame(left, text="1. AI自動作成", padding=8)
+        f_ai = ttk.LabelFrame(left, text="1. AIに自動作成させる", padding=8)
         f_ai.pack(fill=tk.X, pady=(0, 10))
-        self.text_input = scrolledtext.ScrolledText(f_ai, height=4, font=("", 10))
+        self.text_input = scrolledtext.ScrolledText(f_ai, width=20, height=4, font=("", 10))
         self.text_input.pack(fill=tk.X, pady=(0, 5))
-        self.text_input.insert("1.0", "例：近接特化のベテラン。過去に重傷を負い、少し影がある。")
-
-        ttk.Checkbutton(
-            f_ai, text="拡張データ(追加ルール等)を適用する", variable=self.var_use_extra_rules
-        ).pack(anchor="w", pady=(0, 5))
-
-        self.btn_gen = ttk.Button(f_ai, text="✨ シート構成でAI生成", command=self._start_generate)
+        self.text_input.insert("1.0", "例：射撃戦が得意な少女祓魔師。")
+        self.btn_gen = ttk.Button(f_ai, text="✨ AIで生成", command=self._start_generate)
         self.btn_gen.pack(fill=tk.X)
-        self.status_var = tk.StringVar(value="待機中")
-        ttk.Label(f_ai, textvariable=self.status_var, foreground="gray").pack(pady=2)
 
-        f_list = ttk.LabelFrame(left, text="保存済みPC", padding=8)
+        f_list = ttk.LabelFrame(left, text="保存済みキャラクター", padding=8)
         f_list.pack(fill=tk.BOTH, expand=True)
         self.listbox = tk.Listbox(f_list, font=("", 11))
         self.listbox.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
@@ -523,383 +411,78 @@ class VTTCharMakerTab(ttk.Frame):
             side=tk.LEFT, expand=True, fill=tk.X, padx=1
         )
 
-        right_frame = ttk.Frame(paned)
-        paned.add(right_frame, weight=3)
+        # --- 中央ペイン: ステータス・アイテム ---
+        mid = ttk.Frame(paned)
+        paned.add(mid, weight=2)
 
-        self.sheet_notebook = ttk.Notebook(right_frame)
-        self.sheet_notebook.pack(fill=tk.BOTH, expand=True)
+        f_basic = ttk.LabelFrame(mid, text="2. ステータス・アイテム調整", padding=8)
+        f_basic.pack(fill=tk.BOTH, expand=True)
 
-        self.tab_page1 = ttk.Frame(self.sheet_notebook, padding=5)
-        self.tab_page2 = ttk.Frame(self.sheet_notebook, padding=5)
-        self.tab_page3 = ttk.Frame(self.sheet_notebook, padding=5)
-        self.tab_page4 = ttk.Frame(self.sheet_notebook, padding=5)
-        self.tab_output = ttk.Frame(self.sheet_notebook, padding=5)
-
-        self.sheet_notebook.add(self.tab_page1, text=" Page 1: プロフ・能力 ")
-        self.sheet_notebook.add(self.tab_page2, text=" Page 2: 特技・スキル ")
-        self.sheet_notebook.add(self.tab_page3, text=" Page 3: 所持品・備品 ")
-        self.sheet_notebook.add(self.tab_page4, text=" Page 4: 設定欄 (全網羅) ")
-        self.sheet_notebook.add(self.tab_output, text=" 💾 保存・出力 ")
-
-        self._build_page1(self.tab_page1)
-        self._build_page2(self.tab_page2)
-        self._build_page3(self.tab_page3)
-        self._build_page4(self.tab_page4)
-        self._build_output_page(self.tab_output)
-
-    def _build_page1(self, parent):
-        canvas = tk.Canvas(parent, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        f_prof = ttk.LabelFrame(inner, text="プロフィール", padding=8)
-        f_prof.pack(fill=tk.X, pady=5, padx=5)
-        prof_layout = [
-            [("通名", "name"), ("PL名", "pl_name"), ("性別", "gender"), ("年齢", "age")],
-            [
-                ("二つ名", "alias"),
-                ("種族", "race"),
-                ("所属", "affiliation"),
-                ("部門", "department"),
-            ],
-            [
-                ("階級", "rank"),
-                ("出身", "origin"),
-                ("役職/学名", "title"),
-                ("攻撃スタイル", "attack_style"),
-            ],
-            [("最終学歴", "education")],
-        ]
-        for r_idx, row in enumerate(prof_layout):
-            for c_idx, (label, key) in enumerate(row):
-                ttk.Label(f_prof, text=label).grid(
-                    row=r_idx, column=c_idx * 2, sticky="e", padx=2, pady=2
-                )
-                ttk.Entry(f_prof, textvariable=self.vars_prof[key], width=12).grid(
-                    row=r_idx, column=c_idx * 2 + 1, sticky="w", padx=2, pady=2
-                )
-
-        f_stat = ttk.LabelFrame(inner, text="能力値・副能力値", padding=8)
-        f_stat.pack(fill=tk.X, pady=5, padx=5)
-
-        headers = ["初期値", "補正値", "特技", "成長", "最終値"]
-        for i, h in enumerate(headers):
-            ttk.Label(f_stat, text=h, font=("", 8, "bold")).grid(row=0, column=i + 1, padx=4)
-
-        stats_map = [
-            ("【体】", "body"),
-            ("【霊】", "soul"),
-            ("【巧】", "skill"),
-            ("【術】", "magic"),
-        ]
-        for r, (label, key) in enumerate(stats_map, 1):
-            ttk.Label(f_stat, text=label).grid(row=r, column=0, sticky="e")
-            ttk.Entry(f_stat, textvariable=self.vars_main_stats[key]["init"], width=5).grid(
-                row=r, column=1
-            )
-            ttk.Entry(f_stat, textvariable=self.vars_main_stats[key]["mod"], width=5).grid(
-                row=r, column=2
-            )
-            ttk.Entry(f_stat, textvariable=self.vars_main_stats[key]["skill"], width=5).grid(
-                row=r, column=3
-            )
-            ttk.Entry(f_stat, textvariable=self.vars_main_stats[key]["growth"], width=5).grid(
-                row=r, column=4
-            )
-            ttk.Entry(
-                f_stat, textvariable=self.vars_main_stats[key]["final"], width=5, state="readonly"
-            ).grid(row=r, column=5)
-
-        ttk.Separator(f_stat, orient=tk.HORIZONTAL).grid(
-            row=5, column=0, columnspan=6, sticky="ew", pady=5
-        )
-
-        sub_headers = ["初期値", "狩衣", "特技", "補正値", "最終値"]
-        for i, h in enumerate(sub_headers):
-            ttk.Label(f_stat, text=h, font=("", 8, "bold")).grid(row=6, column=i + 1, padx=4)
-
-        sub_stats_map = [
-            ("【体力】", "hp"),
-            ("【霊力】", "sp"),
-            ("【装甲】", "armor"),
-            ("【機動力】", "mobility"),
-        ]
-        for r, (label, key) in enumerate(sub_stats_map, 7):
-            ttk.Label(f_stat, text=label).grid(row=r, column=0, sticky="e")
-            ttk.Entry(f_stat, textvariable=self.vars_sub_stats[key]["init"], width=5).grid(
-                row=r, column=1
-            )
-            ttk.Entry(f_stat, textvariable=self.vars_sub_stats[key]["cloak"], width=5).grid(
-                row=r, column=2
-            )
-            ttk.Entry(f_stat, textvariable=self.vars_sub_stats[key]["skill"], width=5).grid(
-                row=r, column=3
-            )
-            ttk.Entry(f_stat, textvariable=self.vars_sub_stats[key]["mod"], width=5).grid(
-                row=r, column=4
-            )
-            ttk.Entry(
-                f_stat, textvariable=self.vars_sub_stats[key]["final"], width=5, state="readonly"
-            ).grid(row=r, column=5)
-
-        f_combat = ttk.LabelFrame(inner, text="判定補正・装備", padding=8)
-        f_combat.pack(fill=tk.X, pady=5, padx=5)
-        ttk.Label(f_combat, text="狩衣(防具名):").grid(row=0, column=0, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_equip["cloak_name"], width=15).grid(
-            row=0, column=1, sticky="w"
-        )
-        ttk.Label(f_combat, text="攻性祭具(主):").grid(row=0, column=2, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_equip["weapon_name"], width=15).grid(
-            row=0, column=3, sticky="w"
-        )
-        ttk.Label(f_combat, text="攻性祭具(副):").grid(row=0, column=4, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_equip["weapon2_name"], width=15).grid(
-            row=0, column=5, sticky="w"
-        )
-        ttk.Separator(f_combat, orient=tk.HORIZONTAL).grid(
-            row=1, column=0, columnspan=6, sticky="ew", pady=5
-        )
-        ttk.Label(f_combat, text="近接判定:").grid(row=2, column=0, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_combat_mods["melee"], width=5).grid(
-            row=2, column=1, sticky="w"
-        )
-        ttk.Label(f_combat, text="遠隔判定:").grid(row=2, column=2, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_combat_mods["ranged"], width=5).grid(
-            row=2, column=3, sticky="w"
-        )
-        ttk.Label(f_combat, text="対体補正:").grid(row=3, column=0, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_combat_mods["anti_body"], width=5).grid(
-            row=3, column=1, sticky="w"
-        )
-        ttk.Label(f_combat, text="対巧補正:").grid(row=3, column=2, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_combat_mods["anti_skill"], width=5).grid(
-            row=3, column=3, sticky="w"
-        )
-        ttk.Label(f_combat, text="対霊補正:").grid(row=4, column=0, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_combat_mods["anti_soul"], width=5).grid(
-            row=4, column=1, sticky="w"
-        )
-        ttk.Label(f_combat, text="対術補正:").grid(row=4, column=2, sticky="e")
-        ttk.Entry(f_combat, textvariable=self.vars_combat_mods["anti_magic"], width=5).grid(
-            row=4, column=3, sticky="w"
-        )
-
-    def _build_page2(self, parent):
-        canvas = tk.Canvas(parent, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        ttk.Label(inner, text="特技・スキル (最大8つまで登録可能)", font=("", 10, "bold")).pack(
-            anchor="w", pady=5, padx=5
-        )
-        for i, skill in enumerate(self.vars_skills):
-            f_skill = ttk.LabelFrame(inner, text=f"特技枠 {i + 1}", padding=5)
-            f_skill.pack(fill=tk.X, pady=2, padx=5)
-            ttk.Label(f_skill, text="名前:").grid(row=0, column=0, sticky="e")
-            ttk.Entry(f_skill, textvariable=skill["name"], width=20).grid(
-                row=0, column=1, sticky="w", padx=2
-            )
-            ttk.Label(f_skill, text="発動コスト:").grid(row=0, column=2, sticky="e")
-            ttk.Entry(f_skill, textvariable=skill["cost"], width=20).grid(
-                row=0, column=3, sticky="w", padx=2
-            )
-            ttk.Label(f_skill, text="発動条件:").grid(row=1, column=0, sticky="e")
-            ttk.Entry(f_skill, textvariable=skill["condition"], width=50).grid(
-                row=1, column=1, columnspan=3, sticky="w", padx=2, pady=2
-            )
-            ttk.Label(f_skill, text="一般効果:").grid(row=2, column=0, sticky="e")
-            ttk.Entry(f_skill, textvariable=skill["effect"], width=50).grid(
-                row=2, column=1, columnspan=3, sticky="w", padx=2, pady=2
+        def make_entry(parent, label, var, r, c, w=5):
+            ttk.Label(parent, text=label).grid(row=r, column=c, sticky="w", padx=4, pady=2)
+            ttk.Entry(parent, textvariable=var, width=w).grid(
+                row=r, column=c + 1, sticky="w", padx=4, pady=2
             )
 
-    def _build_page3(self, parent):
-        canvas = tk.Canvas(parent, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        make_entry(f_basic, "名前:", self.var_name, 0, 0, 15)
+        make_entry(f_basic, "二つ名:", self.var_alias, 0, 2, 15)
 
-        f_inv = ttk.LabelFrame(inner, text="ルール上の所持品リスト (1〜13枠)", padding=8)
-        f_inv.pack(fill=tk.X, pady=5, padx=5)
-        ttk.Label(f_inv, text="枠").grid(row=0, column=0)
-        ttk.Label(f_inv, text="名前").grid(row=0, column=1)
-        ttk.Label(f_inv, text="種類").grid(row=0, column=2)
-        ttk.Label(f_inv, text="個数").grid(row=0, column=3)
-        ttk.Label(f_inv, text=" | ").grid(row=0, column=4)
-        ttk.Label(f_inv, text="枠").grid(row=0, column=5)
-        ttk.Label(f_inv, text="名前").grid(row=0, column=6)
-        ttk.Label(f_inv, text="種類").grid(row=0, column=7)
-        ttk.Label(f_inv, text="個数").grid(row=0, column=8)
-
-        for i, item in enumerate(self.vars_inventory):
-            r = (i // 2) + 1
-            c_offset = 0 if i % 2 == 0 else 5
-            ttk.Label(f_inv, text=f"{i + 1}").grid(row=r, column=c_offset + 0, pady=2)
-            ttk.Entry(f_inv, textvariable=item["name"], width=15).grid(
-                row=r, column=c_offset + 1, padx=2
-            )
-            ttk.Entry(f_inv, textvariable=item["type"], width=8).grid(
-                row=r, column=c_offset + 2, padx=2
-            )
-            ttk.Entry(f_inv, textvariable=item["count"], width=4).grid(
-                row=r, column=c_offset + 3, padx=2
-            )
-
-        f_acc = ttk.LabelFrame(
-            inner, text="RP用 備品・日用品リスト (フレーバー用・ルール外)", padding=8
-        )
-        f_acc.pack(fill=tk.X, pady=10, padx=5)
-        ttk.Label(f_acc, text="品名").grid(row=0, column=0, padx=2)
-        ttk.Label(f_acc, text="詳細/メモ").grid(row=0, column=1, padx=2)
-        ttk.Label(f_acc, text=" | ").grid(row=0, column=2)
-        ttk.Label(f_acc, text="品名").grid(row=0, column=3, padx=2)
-        ttk.Label(f_acc, text="詳細/メモ").grid(row=0, column=4, padx=2)
-
-        for i, acc in enumerate(self.vars_accessories):
-            r = (i // 2) + 1
-            c_offset = 0 if i % 2 == 0 else 3
-            ttk.Entry(f_acc, textvariable=acc["name"], width=18).grid(
-                row=r, column=c_offset + 0, padx=2, pady=2
-            )
-            ttk.Entry(f_acc, textvariable=acc["memo"], width=28).grid(
-                row=r, column=c_offset + 1, padx=2, pady=2
-            )
-            if c_offset == 0:
-                ttk.Label(f_acc, text=" | ").grid(row=r, column=2)
-
-    def _build_page4(self, parent):
-        canvas = tk.Canvas(parent, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        f_psn = ttk.LabelFrame(inner, text="人事簿・基本情報", padding=8)
-        f_psn.pack(fill=tk.X, pady=5, padx=5)
-        psn_layout = [
-            [
-                ("姓名(非公開可)", "real_name"),
-                ("誕生日", "birthday"),
-                ("身長", "height"),
-                ("体重", "weight"),
-            ],
-            [
-                ("血液型", "blood_type"),
-                ("信じる宗教", "religion"),
-                ("勤務歴", "service_years"),
-                ("適性検査結果", "apt_test"),
-            ],
-        ]
-        for r_idx, row in enumerate(psn_layout):
-            for c_idx, (label, key) in enumerate(row):
-                ttk.Label(f_psn, text=label).grid(
-                    row=r_idx, column=c_idx * 2, sticky="e", padx=2, pady=2
-                )
-                ttk.Entry(f_psn, textvariable=self.vars_lore[key], width=15).grid(
-                    row=r_idx, column=c_idx * 2 + 1, sticky="w", padx=2, pady=2
-                )
-
-        f_apt = ttk.LabelFrame(inner, text="能力測定(A〜F)・適性", padding=8)
-        f_apt.pack(fill=tk.X, pady=5, padx=5)
-        apt_layout = [
-            [("身体強度", "eval_body"), ("霊体強度", "eval_soul"), ("加護出力", "eval_output")],
-            [("被呪耐性", "eval_resist"), ("祭具運用", "eval_tool"), ("生得調査", "innate_type")],
-            [("適性攻性祭具", "apt_weapon"), ("適性補助祭具", "apt_support"), ("", "")],
-        ]
-        for r_idx, row in enumerate(apt_layout):
-            for c_idx, (label, key) in enumerate(row):
-                if label:
-                    ttk.Label(f_apt, text=label).grid(
-                        row=r_idx, column=c_idx * 2, sticky="e", padx=2, pady=2
-                    )
-                    ttk.Entry(f_apt, textvariable=self.vars_lore[key], width=15).grid(
-                        row=r_idx, column=c_idx * 2 + 1, sticky="w", padx=2, pady=2
-                    )
-
-        f_spc = ttk.LabelFrame(inner, text="特殊所見 (被呪・障骸)", padding=8)
-        f_spc.pack(fill=tk.X, pady=5, padx=5)
-
-        ttk.Label(f_spc, text="被呪・残穢係数:").grid(row=0, column=0, sticky="e")
-        ttk.Entry(f_spc, textvariable=self.vars_lore["curse_coeff"], width=20).grid(
-            row=0, column=1, sticky="w"
-        )
-        ttk.Label(f_spc, text="[所見]:").grid(row=0, column=2, sticky="e")
-        self.text_curse_remarks = scrolledtext.ScrolledText(
-            f_spc, height=2, width=40, font=("", 10)
-        )
-        self.text_curse_remarks.grid(row=0, column=3, sticky="w", padx=5, pady=2)
-
-        ttk.Label(f_spc, text="障骸等級:").grid(row=1, column=0, sticky="e")
-        ttk.Entry(f_spc, textvariable=self.vars_lore["impairment"], width=20).grid(
-            row=1, column=1, sticky="w"
-        )
-        ttk.Label(f_spc, text="[所見]:").grid(row=1, column=2, sticky="e")
-        self.text_impairment_remarks = scrolledtext.ScrolledText(
-            f_spc, height=2, width=40, font=("", 10)
-        )
-        self.text_impairment_remarks.grid(row=1, column=3, sticky="w", padx=5, pady=2)
-
-        def make_txt(parent_frame, title, height=3):
-            f = ttk.LabelFrame(parent_frame, text=title, padding=5)
-            f.pack(fill=tk.X, pady=2, padx=5)
-            t = scrolledtext.ScrolledText(f, height=height, font=("", 10))
-            t.pack(fill=tk.BOTH, expand=True)
-            return t
-
-        self.text_history = make_txt(inner, "個人履歴", 3)
-        self.text_career = make_txt(inner, "経歴", 3)
-        self.text_attendance = make_txt(inner, "勤怠表", 2)
-        self.text_health = make_txt(inner, "健康診断", 3)
-        self.text_seminary_report = make_txt(inner, "神官学校・神学院における内申報告書", 3)
-        self.text_investigation = make_txt(inner, "興信所による個人身辺調査", 3)
-        self.text_family_comments = make_txt(inner, "家族・知人からのコメント", 3)
-
-        f_ov = ttk.LabelFrame(inner, text="総括所見", padding=5)
-        f_ov.pack(fill=tk.X, pady=2, padx=5)
-        self.text_overall_remarks = scrolledtext.ScrolledText(f_ov, height=3, font=("", 10))
-        self.text_overall_remarks.pack(fill=tk.X, pady=(0, 5))
-        f_sig = ttk.Frame(f_ov)
-        f_sig.pack(fill=tk.X)
-        ttk.Label(f_sig, text="ーー担当者名:").pack(side=tk.LEFT)
-        ttk.Entry(f_sig, textvariable=self.vars_lore["examiner_name"], width=20).pack(
-            side=tk.LEFT, padx=5
+        ttk.Separator(f_basic, orient=tk.HORIZONTAL).grid(
+            row=1, column=0, columnspan=4, sticky="ew", pady=6
         )
 
-    def _build_output_page(self, parent):
-        ttk.Label(parent, text="キャラクターデータの保存・出力", font=("", 11, "bold")).pack(
-            anchor="w", pady=10
+        make_entry(f_basic, "体力(HP):", self.var_hp, 2, 0)
+        make_entry(f_basic, "霊力(SP):", self.var_sp, 2, 2)
+        make_entry(f_basic, "回避D:", self.var_evasion, 3, 0)
+        make_entry(f_basic, "機動力:", self.var_mobility, 3, 2)
+        make_entry(f_basic, "装甲:", self.var_armor, 4, 0)
+
+        ttk.Separator(f_basic, orient=tk.HORIZONTAL).grid(
+            row=5, column=0, columnspan=4, sticky="ew", pady=6
         )
-        btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(
-            btn_frame, text="💾 現在のシートをPCとして保存", command=self._save_current, width=30
-        ).pack(side=tk.LEFT, padx=5)
-        ttk.Button(
-            btn_frame,
-            text="📋 CCFolia 駒＆コマパレ用データ コピー",
-            command=self._copy_ccfolia,
-            width=40,
-        ).pack(side=tk.LEFT, padx=5)
-        ttk.Label(parent, text="メモ・その他（CCFoliaに一緒に出力されます）:").pack(
-            anchor="w", pady=(15, 2)
+
+        make_entry(f_basic, "体:", self.var_body, 6, 0)
+        make_entry(f_basic, "霊:", self.var_soul, 6, 2)
+        make_entry(f_basic, "巧:", self.var_skill, 7, 0)
+        make_entry(f_basic, "術:", self.var_magic, 7, 2)
+
+        ttk.Separator(f_basic, orient=tk.HORIZONTAL).grid(
+            row=8, column=0, columnspan=4, sticky="ew", pady=6
         )
-        self.text_memo = scrolledtext.ScrolledText(parent, height=10, font=("", 10))
+
+        make_entry(f_basic, "形代:", self.var_katashiro, 9, 0)
+        make_entry(f_basic, "祓串:", self.var_haraegushi, 9, 2)
+        make_entry(f_basic, "注連鋼縄:", self.var_shimenawa, 10, 0)
+        make_entry(f_basic, "呪瘤檀:", self.var_juryudan, 10, 2)
+        make_entry(f_basic, "医霊器具:", self.var_ireikigu, 11, 0)
+        make_entry(f_basic, "名伏:", self.var_meifuku, 11, 2)
+        make_entry(f_basic, "術延起点:", self.var_jutsuyen, 12, 0)
+
+        # --- 右ペイン: 設定・出力 ---
+        right = ttk.Frame(paned)
+        paned.add(right, weight=2)
+
+        f_memo = ttk.LabelFrame(right, text="3. キャラ設定・メモ", padding=8)
+        f_memo.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.text_memo = scrolledtext.ScrolledText(f_memo, font=("", 10), wrap=tk.WORD)
         self.text_memo.pack(fill=tk.BOTH, expand=True)
+
+        f_out = ttk.LabelFrame(right, text="4. 保存と出力", padding=8)
+        f_out.pack(fill=tk.X)
+
+        self.status_var = tk.StringVar(value="ステータスを調整して出力してください")
+        ttk.Label(
+            f_out, textvariable=self.status_var, foreground="blue", font=("", 9, "bold")
+        ).pack(pady=(0, 4))
+
+        ttk.Button(f_out, text="💾 このキャラを保存する", command=self._save_current).pack(
+            fill=tk.X, pady=2
+        )
+        ttk.Button(
+            f_out, text="📋 ココフォリア用コマとしてコピー", command=self._copy_ccfolia
+        ).pack(fill=tk.X, pady=2)
+
+    # ---- リスト管理 ----
 
     def _refresh_saved_list(self):
         self.listbox.delete(0, tk.END)
@@ -917,529 +500,262 @@ class VTTCharMakerTab(ttk.Frame):
             return None
         return self.saved_files[idx[0]]
 
+    # ---- 保存・読込・削除 ----
+
     def _save_current(self):
-        name = self.vars_prof["name"].get().strip() or "NoName"
-        file_name = simpledialog.askstring(
-            "保存",
-            "保存するファイル名を入力してください",
-            initialvalue=name,
-            parent=self.winfo_toplevel(),
-        )
-        if not file_name:
+        name = self.var_name.get().strip()
+        if not name:
+            messagebox.showerror("エラー", "名前を入力してください。")
             return
 
-        data = {
-            "prof": {k: v.get() for k, v in self.vars_prof.items()},
-            "main_stats": {
-                stat: {k: v.get() for k, v in vals.items()}
-                for stat, vals in self.vars_main_stats.items()
-            },
-            "sub_stats": {
-                stat: {k: v.get() for k, v in vals.items()}
-                for stat, vals in self.vars_sub_stats.items()
-            },
-            "equip": {k: v.get() for k, v in self.vars_equip.items()},
-            "combat_mods": {k: v.get() for k, v in self.vars_combat_mods.items()},
-            "skills": [{k: v.get() for k, v in s.items()} for s in self.vars_skills],
-            "inventory": [{k: v.get() for k, v in i.items()} for i in self.vars_inventory],
-            "accessories": [{k: v.get() for k, v in a.items()} for a in self.vars_accessories],
-            "lore": {k: v.get() for k, v in self.vars_lore.items()},
-            "text_history": self.text_history.get("1.0", tk.END).strip(),
-            "text_career": self.text_career.get("1.0", tk.END).strip(),
-            "text_attendance": self.text_attendance.get("1.0", tk.END).strip(),
-            "text_health": self.text_health.get("1.0", tk.END).strip(),
-            "text_curse_remarks": self.text_curse_remarks.get("1.0", tk.END).strip(),
-            "text_impairment_remarks": self.text_impairment_remarks.get("1.0", tk.END).strip(),
-            "text_seminary_report": self.text_seminary_report.get("1.0", tk.END).strip(),
-            "text_investigation": self.text_investigation.get("1.0", tk.END).strip(),
-            "text_family_comments": self.text_family_comments.get("1.0", tk.END).strip(),
-            "text_overall_remarks": self.text_overall_remarks.get("1.0", tk.END).strip(),
-            "memo": self.text_memo.get("1.0", tk.END).strip(),
+        data = self._last_json_raw.copy()
+        data.update(
+            {
+                "name": name,
+                "alias": self.var_alias.get(),
+                "hp": self.var_hp.get(),
+                "sp": self.var_sp.get(),
+                "evasion": self.var_evasion.get(),
+                "mobility": self.var_mobility.get(),
+                "armor": self.var_armor.get(),
+                "body": self.var_body.get(),
+                "soul": self.var_soul.get(),
+                "skill": self.var_skill.get(),
+                "magic": self.var_magic.get(),
+                "memo": self.text_memo.get("1.0", tk.END).strip(),
+            }
+        )
+        data["items"] = {
+            "katashiro": self.var_katashiro.get(),
+            "haraegushi": self.var_haraegushi.get(),
+            "shimenawa": self.var_shimenawa.get(),
+            "juryudan": self.var_juryudan.get(),
+            "ireikigu": self.var_ireikigu.get(),
+            "meifuku": self.var_meifuku.get(),
+            "jutsuyen": self.var_jutsuyen.get(),
         }
 
-        path = SAVED_PCS_DIR / f"{file_name}.json"
-        save_json(path, data)
+        save_json(SAVED_PCS_DIR / f"{name}.json", data)
+        self.status_var.set(f"✓ {name} を保存しました！")
         self._refresh_saved_list()
-        messagebox.showinfo("保存完了", f"{file_name} として保存しました！")
 
     def _load_selected(self):
         file_path = self._get_selected_file()
         if not file_path:
             return
         data = load_json(file_path)
-        self._apply_data_to_ui(data)
-        self.status_var.set(f"✓ {data.get('prof', {}).get('name', 'キャラ')} を読み込みました")
+        self._apply_json_to_ui(data)
+        self.status_var.set(f"✓ {data.get('name', 'キャラ')} を読み込みました")
 
     def _delete_selected(self):
         file_path = self._get_selected_file()
         if not file_path:
             return
-        if messagebox.askyesno("削除", f"{file_path.stem} を削除しますか？"):
+        if messagebox.askyesno("削除確認", f"{file_path.stem} を削除しますか？"):
             file_path.unlink(missing_ok=True)
             self._refresh_saved_list()
 
-    def _start_generate(self):
-        print("DEBUG: [生成]ボタンがクリックされました")
-        if not self.lm_client.is_server_running():
-            import tkinter.messagebox as messagebox
+    # ---- UI反映 (新旧フォーマット両対応) ----
 
+    def _apply_json_to_ui(self, data: dict):
+        # 旧ネスト形式の検出と変換
+        if "prof" in data or "main_stats" in data:
+            data = self._convert_old_format(data)
+
+        self._last_json_raw = data
+        self.var_name.set(data.get("name", "名無し"))
+        self.var_alias.set(data.get("alias", ""))
+        self.var_hp.set(data.get("hp", 10))
+        self.var_sp.set(data.get("sp", 10))
+        self.var_evasion.set(data.get("evasion", 2))
+        self.var_mobility.set(data.get("mobility", 2))
+        self.var_armor.set(data.get("armor", 0))
+        self.var_body.set(data.get("body", 3))
+        self.var_soul.set(data.get("soul", 3))
+        self.var_skill.set(data.get("skill", 3))
+        self.var_magic.set(data.get("magic", 3))
+
+        items = data.get("items", {})
+        self.var_katashiro.set(items.get("katashiro", 1))
+        self.var_haraegushi.set(items.get("haraegushi", 0))
+        self.var_shimenawa.set(items.get("shimenawa", 0))
+        self.var_juryudan.set(items.get("juryudan", 0))
+        self.var_ireikigu.set(items.get("ireikigu", 0))
+        self.var_meifuku.set(items.get("meifuku", 0))
+        self.var_jutsuyen.set(items.get("jutsuyen", 0))
+
+        self.text_memo.delete("1.0", tk.END)
+        self.text_memo.insert("1.0", data.get("memo", ""))
+
+    def _convert_old_format(self, data: dict) -> dict:
+        """旧ネスト形式(prof/main_stats/sub_stats等)をフラット形式に変換"""
+        flat = {}
+        prof = data.get("prof", {})
+        flat["name"] = prof.get("name", "名無し")
+        flat["alias"] = prof.get("alias", "")
+
+        main_stats = data.get("main_stats", {})
+        for key in ["body", "soul", "skill", "magic"]:
+            vals = main_stats.get(key, {})
+            flat[key] = vals.get("final", vals.get("init", 3))
+
+        sub_stats = data.get("sub_stats", {})
+        for key in ["hp", "sp", "armor", "mobility"]:
+            vals = sub_stats.get(key, {})
+            flat[key] = vals.get("final", vals.get("init", 0))
+        flat["evasion"] = 2
+
+        # 旧inventoryからitemsを抽出
+        items = {}
+        item_key_map = {
+            "形代": "katashiro", "祓串": "haraegushi", "注連鋼縄": "shimenawa",
+            "呪瘤檀": "juryudan", "医霊器具": "ireikigu", "名伏": "meifuku",
+            "術延起点": "jutsuyen",
+        }
+        for inv in data.get("inventory", []):
+            name = inv.get("name", "")
+            if name in item_key_map:
+                items[item_key_map[name]] = inv.get("count", 0)
+        flat["items"] = items
+
+        # 旧テキストフィールドをmemoに結合
+        memo_parts = []
+        if data.get("memo"):
+            memo_parts.append(data["memo"])
+        for text_key in [
+            "text_history", "text_career", "text_attendance", "text_health",
+            "text_seminary_report", "text_investigation",
+            "text_family_comments", "text_overall_remarks",
+        ]:
+            if data.get(text_key):
+                memo_parts.append(data[text_key])
+        flat["memo"] = "\n\n".join(memo_parts)
+
+        # skills/weaponsは旧形式にもあれば保持
+        if "skills" in data:
+            flat["skills"] = data["skills"]
+        if "weapons" in data:
+            flat["weapons"] = data["weapons"]
+
+        return flat
+
+    # ---- AI生成 (1段階) ----
+
+    def _build_char_prompt(self, user_req: str) -> str:
+        return f"""あなたはTRPG『タクティカル祓魔師』のプレイヤーです。
+ユーザーの要望に合わせて、以下のJSONフォーマットの空欄を論理的に埋めてください。
+武器や特技などはユーザーの要望に合わせて複数個作成してください。
+【ルール概要】体+霊+巧+(術×2)=11、HP=体、SP=霊、機動力=ceil(max(体,巧)/2)(最低2)
+【重要】必ず有効なJSON形式のみを出力し、Markdownコードブロック(```json)などは使用しないでください。
+
+ユーザー要望: {user_req}
+
+{{
+  "name": "キャラクターの名前", "alias": "二つ名",
+  "hp": 15, "sp": 15, "evasion": 2, "mobility": 3, "armor": 0,
+  "body": 3, "soul": 3, "skill": 3, "magic": 3,
+  "items": {{"katashiro": 1, "haraegushi": 0, "shimenawa": 0, "juryudan": 0, "ireikigu": 0, "meifuku": 0, "jutsuyen": 0}},
+  "memo": "キャラクターの背景や性格",
+  "skills": [
+    {{"name": "戦術機動", "description": "手番開始時に使用可能。『難易度:NORMAL』で【巧】判定を行う。成功した場合、即座に回避ダイスを2つ獲得し、更にその手番中は最大で【機動力】の2倍のマスを移動できる。 ただし、手番中に行う能動的な行動の判定の難易度が1段階上昇する。【巧】判定に失敗した場合、回避ダイスの獲得と移動距離の増加は行われず、判定の難易度上昇だけを被る。"}}
+  ],
+  "weapons": [
+    {{"name": "大型遠隔祭具", "description": "【巧】の値を参照して「遠隔攻撃」を行い、攻撃成功時、「5」点の物理ダメージを与える。"}}
+  ]
+}}
+"""
+
+    def _start_generate(self):
+        if not self.lm_client.is_server_running():
             messagebox.showerror("エラー", "LM-Studioが起動していません。")
             return
-
         self.btn_gen.config(state="disabled")
-        self.update()
+        self.status_var.set("生成中...お待ちください")
 
         def run():
             user_req = self.text_input.get("1.0", tk.END).strip()
-            try:
-                with open("configs/world_setting_compressed.txt", encoding="utf-8") as f:
-                    compressed_data = f.read()
-            except FileNotFoundError:
-                compressed_data = "※エラー: configs/world_setting_compressed.txt が見つかりません。"
-
-            self.after(
-                0,
-                lambda: self.status_var.set(
-                    "生成中 (Step 1/2: ルールに従いキャラクターを構築中...)"
-                ),
+            sys_prompt = "あなたはデータジェネレーターです。必ず指定されたJSON形式のみを出力し、余計な会話はしないでください。"
+            user_msg = self._build_char_prompt(user_req)
+            result, _ = self.lm_client.generate_response(
+                system_prompt=sys_prompt,
+                user_message=user_msg,
+                temperature=0.7,
+                max_tokens=1500,
+                timeout=None,
+                no_think=True,
             )
-
-            sys_prompt_step1 = (
-                "あなたはTRPG『タクティカル祓魔師』の厳格かつ創造的なGMです。\n"
-                f"【世界観データ】\n{compressed_data}\n\n"
-                "ユーザーの要望に合わせてキャラクターを作成します。\n"
-                "JSONなどのプログラム形式は一切意識せず、人間が読みやすい文章や箇条書きで出力してください。\n\n"
-                "【絶対遵守ルール — 違反は一切許容しない】\n\n"
-                "■ 1. 能力値配分（スクラッチ方式）\n"
-                "  - B(体), R(霊), K(巧), A(術) の合計は【必ず11pt】。\n"
-                "  - B, R, K は各1〜5。A は0〜3。\n"
-                "  - A の1ptは通常の2倍コスト（A1=2pt, A2=4pt, A3=6pt）。\n"
-                "  - 検算式: B + R + K + (A × 2) = 11 を必ず満たすこと。\n\n"
-                "■ 2. 副能力値（計算式厳守）\n"
-                "  - HP = B（体の値そのまま）\n"
-                "  - MP = R（霊の値そのまま）\n"
-                "  - MV = max(B, K) ÷ 2 切り上げ（最低2）\n"
-                "  - ED(回避ダイス) = max(B, R, K)\n"
-                "  ※計算結果を必ず明記し、途中計算も示すこと。\n\n"
-                "■ 3. 特技選択ルール\n"
-                "  - 全員自動取得: 戦術機動(TM)\n"
-                "  - 追加で1個選択（以下から1つ）:\n"
-                "    白兵戦適性 / 射撃戦適性 / 汎用祭具適性 / 強靭身体 / 被呪耐性 / 機動戦適性 / 回避体術\n"
-                "  - A=0の場合のみ、さらに+1個追加で選択可（計2個+TM）。\n"
-                "  - 上記リストに存在しない特技名を捏造してはならない。\n\n"
-                "■ 4. 祓魔術取得ルール\n"
-                "  - A≥1のキャラのみ取得可能。A=0は祓魔術を一切持てない。\n"
-                "  - 取得は1d6ロールで決定（GM許可で選択可）:\n"
-                "    1:加護防壁 2:反閇歩法 3:霊力放出 4:霊弾発射 5:呪祝詛詞 6:式神使役\n"
-                "  - 上記6種以外の祓魔術は存在しない。捏造禁止。\n\n"
-                "■ 5. 攻性祭具（武器）選択ルール\n"
-                "  - 最大2個まで選択可。\n"
-                "  - 携行コスト合計 ≤ 4（片手(1H)=コスト1、両手(2H)=コスト2）。\n"
-                "  - 初期選択可能な祭具（各BUD5）:\n"
-                "    [近接] 小型近接(1H) / 中型近接(1H) / 大型近接(2H) / 霊的近接(2H)\n"
-                "    [遠隔] 小型遠隔(1H) / 中型遠隔(2H) / 大型遠隔(2H) / 霊的遠隔(2H)\n"
-                "  - 各祭具の参照能力値・ダメージ・特殊能力はデータ通りに記載すること。\n"
-                "  - 携行コスト合計が4を超える組み合わせは不可（例: 2H+2H+1H=5 → 違反）。\n\n"
-                "■ 6. 狩衣（防具）選択ルール\n"
-                "  - 1種を必ず選択（選択必須）:\n"
-                "    軽装(ED+2/HAND) / 中装(ED+1/HAND, ARM+1) / 重装(ARM+3, TM難易度+1)\n"
-                "  - 狩衣未選択は不可。\n\n"
-                "■ 7. 支給品（固定＋選択）\n"
-                "  - 固定支給: 形代(KT)×7、祓串(PG)×7、注連鋼縄(SHN)×21\n"
-                "  - 選択支給（以下から1つ）:\n"
-                "    疑似穢×3 / 名伏×3 / 医霊器具×3 / 呪瘤檀×3 / 術延起点×1\n"
-                "  - 上記以外の支給品を捏造してはならない。\n\n"
-                "■ 8. 判定補正の計算\n"
-                "  - 近接補正(melee): 特技・祭具による近接攻撃ダイス修正の合計\n"
-                "  - 遠隔補正(ranged): 特技・祭具による遠隔攻撃ダイス修正の合計\n"
-                "  - 例: 白兵戦適性(+2) → melee=+2, ranged=0\n"
-                "  - 例: 射撃戦適性(+2) → melee=0, ranged=+2\n"
-                "  - 例: 汎用祭具適性(+1/+1) → melee=+1, ranged=+1\n\n"
-                "■ 9. 世界観の反映（すべて必須）\n"
-                "  - 基本情報: 年齢, 性別, 身長, 体重, 血液型\n"
-                "  - 所属組織: MOE/KKR/SAK/CHN/JGU系列 等から選択\n"
-                "  - 人事簿: 信じる宗教, 勤務歴, 適性検査結果, 身体強度〜霊体強度のA〜F評価\n"
-                "  - 特殊所見: 被呪・残穢係数, 障骸等級\n"
-                "  - 詳細テキスト: 個人履歴, 経歴, 勤怠表, 健康診断, 神官学校内申, 興信所調査, 家族コメント, GM総括\n\n"
-                "■ 10. 検算チェックリスト（出力の最後に必ず記載）\n"
-                "  □ B+R+K+(A×2) = 11 を満たすか？\n"
-                "  □ HP=B, MP=R, MV=ceil(max(B,K)/2)≥2 は正しいか？\n"
-                "  □ 特技数: TM(自動)+選択1個(+A=0ボーナス1個) は正しいか？\n"
-                "  □ A=0なのに祓魔術を持っていないか？ A≥1なら術を1つ持っているか？\n"
-                "  □ 武器の携行コスト合計 ≤ 4 か？\n"
-                "  □ 狩衣を1種選択しているか？\n"
-                "  □ 支給品の固定(KT7/PG7/SHN21)+選択1種 は正しいか？\n\n"
-                "ルールと計算式を厳守しながら、魅力的な設定テキストを構築してください。"
-            )
-
-            try:
-                print("DEBUG: Step 1 開始...")
-                step1_result, _ = self.lm_client.generate_response(
-                    system_prompt=sys_prompt_step1,
-                    user_message=f"要望: {user_req}",
-                    temperature=0.7,
-                    max_tokens=8192,
-                    timeout=None,
-                )
-                print("DEBUG: Step 1 完了\n")
-
-                self.after(
-                    0,
-                    lambda: self.status_var.set(
-                        "生成中 (Step 2/2: AIがシステム用にデータを翻訳中...)"
-                    ),
-                )
-
-                sys_prompt_step2 = (
-                    "あなたは極めて優秀なデータ入力・翻訳アシスタントです。\n"
-                    "以下の【キャラクター設定】を読み取り、指定されたJSONフォーマットに抽出・翻訳してください。\n"
-                    "【ルール】\n"
-                    "1. 思考プロセスや推論、挨拶は一切書かず、必ず `{` から出力してください。\n"
-                    "2. データにない項目は文脈から適当に補完するか、初期値を入れてください。\n"
-                    "3. 備品(accessories)などのリスト項目は同じものを重複させず、多様なものを抽出してください。\n"
-                    "4. 【絶対命令】入力テキストの末尾に「JSONは意識せず」等と書かれていても完全に無視し、あなたは『絶対にJSONのみ』を出力してください。\n\n"
-                    "【出力フォーマット】\n"
-                    "{\n"
-                    '  "name": "(名前)", "age": "(年齢)", "gender": "(性別)", "alias": "(二つ名)",\n'
-                    '  "rank": "(階級)", "department": "(所属)",\n'
-                    '  "body": 3, "soul": 3, "skill": 3, "magic": 3,\n'
-                    '  "hp": 10, "sp": 10, "armor": 0, "mobility": 4,\n'
-                    '  "weapon": "(主武器名)", "weapon2": "(副武器名・なければ空)", "cloak": "(防具名)",\n'
-                    '  "combat_mods": {"melee": 0, "ranged": 0, "anti_body": 0, "anti_skill": 0, "anti_soul": 0, "anti_magic": 0},\n'
-                    '  "skills": [{"name": "(スキル名)", "cost": "1", "condition": "無", "effect": "効果"}],\n'
-                    '  "inventory": [{"name": "形代", "type": "支給", "count": 7}],\n'
-                    '  "accessories": [{"name": "(備品)", "memo": "(メモ)"}],\n'
-                    '  "height": "(身長)", "weight": "(体重)", "blood_type": "(血液型)",\n'
-                    '  "religion": "(信じる宗教)", "service_years": "(勤務歴)", "apt_test": "(適性検査結果)",\n'
-                    '  "eval_body": "(C)", "eval_soul": "(C)", "eval_output": "(C)",\n'
-                    '  "eval_resist": "(C)", "eval_tool": "(C)", "innate_type": "(生得)",\n'
-                    '  "curse_coeff": "(任務に支障なし等)", "impairment": "(障骸なし等)",\n'
-                    '  "text_history": "(過去の経歴)", "text_career": "(現在の役職)",\n'
-                    '  "text_attendance": "(勤怠表)", "text_health": "(健康状態)",\n'
-                    '  "text_seminary_report": "(内申報告書)", "text_investigation": "(興信所調査)",\n'
-                    '  "text_family_comments": "(知人からのコメント)", "text_overall_remarks": "(GMからの所見)"\n'
-                    "}"
-                )
-
-                print("DEBUG: Step 2 開始...")
-                step2_result, _ = self.lm_client.generate_response(
-                    system_prompt=sys_prompt_step2,
-                    user_message=f"【キャラクター設定】\n{step1_result}",
-                    temperature=0.1,
-                    max_tokens=4096,
-                    timeout=None,
-                    no_think=True,
-                )
-                print("DEBUG: Step 2 完了\n")
-
-                self.after(0, self._on_finish, step2_result)
-
-            except Exception as e:
-                self.after(0, lambda e=e: self.status_var.set(f"❌ 内部エラー: {e}"))
-                self.after(0, lambda: self.btn_gen.config(state="normal"))
-
-        import threading
+            self.after(0, self._on_finish, result)
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_finish(self, result_content: str):
+    def _on_finish(self, result: str):
         self.btn_gen.config(state="normal")
-        print("=== AIの出力結果 ===")
-        print(result_content)
-
-        data = parse_llm_json_robust(result_content)
-        if not data:
-            self.status_var.set("❌ 生成失敗 (AIの出力からデータが抽出できませんでした)")
+        if not result:
+            self.status_var.set("❌ 生成失敗")
             return
 
+        # まず標準JSONパースを試行
+        clean = result.replace("```json", "").replace("```", "").strip()
         try:
-            if hasattr(self, "vars_prof"):
-                if "name" in self.vars_prof:
-                    self.vars_prof["name"].set(data.get("name", "名称未設定"))
-                if "age" in self.vars_prof:
-                    self.vars_prof["age"].set(data.get("age", ""))
-                if "gender" in self.vars_prof:
-                    self.vars_prof["gender"].set(data.get("gender", ""))
-                if "alias" in self.vars_prof:
-                    self.vars_prof["alias"].set(data.get("alias", ""))
-                if "rank" in self.vars_prof:
-                    self.vars_prof["rank"].set(data.get("rank", ""))
-                if "department" in self.vars_prof:
-                    self.vars_prof["department"].set(data.get("department", "境界対策課"))
-                if "attack_style" in self.vars_prof:
-                    self.vars_prof["attack_style"].set("AI自動生成")
-                if "race" in self.vars_prof:
-                    self.vars_prof["race"].set("人間")
-                if "affiliation" in self.vars_prof:
-                    self.vars_prof["affiliation"].set("環境庁 神祇部")
+            data = json.loads(clean)
+            self._apply_json_to_ui(data)
+            self.status_var.set("✓ 生成完了！内容を調整してください")
+            return
+        except json.JSONDecodeError:
+            pass
 
-            if hasattr(self, "vars_lore"):
-                lore_keys = [
-                    "height",
-                    "weight",
-                    "blood_type",
-                    "religion",
-                    "service_years",
-                    "apt_test",
-                    "eval_body",
-                    "eval_soul",
-                    "eval_output",
-                    "eval_resist",
-                    "eval_tool",
-                    "innate_type",
-                    "curse_coeff",
-                    "impairment",
-                ]
-                for k in lore_keys:
-                    if k in self.vars_lore:
-                        self.vars_lore[k].set(data.get(k, ""))
+        # フォールバック: ロバストパーサー
+        data = parse_llm_json_robust(result)
+        if data:
+            self._apply_json_to_ui(data)
+            self.status_var.set("✓ 生成完了（フォールバック）！内容を調整してください")
+        else:
+            self.status_var.set("❌ JSONパースエラー")
+            print(f"パース失敗した出力: {result[:200]}")
 
-            if hasattr(self, "vars_main_stats"):
-                stats_map = {"body": "body", "soul": "soul", "skill": "skill", "magic": "magic"}
-                for ai_key, gui_key in stats_map.items():
-                    val = int(data.get(ai_key, 3))
-                    if gui_key in self.vars_main_stats:
-                        if "init" in self.vars_main_stats[gui_key]:
-                            self.vars_main_stats[gui_key]["init"].set(val)
-                        if "final" in self.vars_main_stats[gui_key]:
-                            self.vars_main_stats[gui_key]["final"].set(val)
-
-            if hasattr(self, "vars_sub_stats"):
-                sub_map = {"hp": "hp", "sp": "sp", "armor": "armor", "mobility": "mobility"}
-                for ai_key, gui_key in sub_map.items():
-                    val = int(data.get(ai_key, 0))
-                    if gui_key in self.vars_sub_stats:
-                        if "init" in self.vars_sub_stats[gui_key]:
-                            self.vars_sub_stats[gui_key]["init"].set(val)
-                        if "final" in self.vars_sub_stats[gui_key]:
-                            self.vars_sub_stats[gui_key]["final"].set(val)
-
-            if hasattr(self, "vars_equip"):
-                if "weapon_name" in self.vars_equip:
-                    self.vars_equip["weapon_name"].set(data.get("weapon", ""))
-                if "weapon2_name" in self.vars_equip:
-                    self.vars_equip["weapon2_name"].set(data.get("weapon2", ""))
-                if "cloak_name" in self.vars_equip:
-                    self.vars_equip["cloak_name"].set(data.get("cloak", ""))
-
-            if hasattr(self, "vars_combat_mods"):
-                mods = data.get("combat_mods", {})
-                if isinstance(mods, dict):
-                    for k in [
-                        "melee",
-                        "ranged",
-                        "anti_body",
-                        "anti_skill",
-                        "anti_soul",
-                        "anti_magic",
-                    ]:
-                        try:
-                            self.vars_combat_mods[k].set(int(mods.get(k, 0)))
-                        except (ValueError, TypeError):
-                            pass
-
-            if hasattr(self, "vars_skills"):
-                for s in self.vars_skills:
-                    for k in s.keys():
-                        s[k].set("")
-                for i, s_data in enumerate(data.get("skills", [])):
-                    if i < len(self.vars_skills):
-                        if "name" in self.vars_skills[i]:
-                            self.vars_skills[i]["name"].set(s_data.get("name", ""))
-                        if "cost" in self.vars_skills[i]:
-                            self.vars_skills[i]["cost"].set(s_data.get("cost", ""))
-                        if "condition" in self.vars_skills[i]:
-                            self.vars_skills[i]["condition"].set(s_data.get("condition", ""))
-                        if "effect" in self.vars_skills[i]:
-                            self.vars_skills[i]["effect"].set(s_data.get("effect", ""))
-
-            if hasattr(self, "vars_inventory"):
-                for inv in self.vars_inventory:
-                    inv["name"].set("")
-                    inv["type"].set("")
-                    inv["count"].set(0)
-                for i, i_data in enumerate(data.get("inventory", [])):
-                    if i < len(self.vars_inventory):
-                        if "name" in self.vars_inventory[i]:
-                            self.vars_inventory[i]["name"].set(i_data.get("name", ""))
-                        if "type" in self.vars_inventory[i]:
-                            self.vars_inventory[i]["type"].set(i_data.get("type", ""))
-                        if "count" in self.vars_inventory[i]:
-                            try:
-                                self.vars_inventory[i]["count"].set(int(i_data.get("count", 0)))
-                            except Exception:
-                                pass
-
-            if hasattr(self, "vars_accessories"):
-                for a in self.vars_accessories:
-                    for k in a.keys():
-                        a[k].set("")
-                for i, a_data in enumerate(data.get("accessories", [])):
-                    if i < len(self.vars_accessories):
-                        if "name" in self.vars_accessories[i]:
-                            self.vars_accessories[i]["name"].set(a_data.get("name", ""))
-                        if "memo" in self.vars_accessories[i]:
-                            self.vars_accessories[i]["memo"].set(a_data.get("memo", ""))
-
-            text_widgets = {
-                "text_history": getattr(self, "text_history", None),
-                "text_career": getattr(self, "text_career", None),
-                "text_attendance": getattr(self, "text_attendance", None),
-                "text_health": getattr(self, "text_health", None),
-                "text_seminary_report": getattr(self, "text_seminary_report", None),
-                "text_investigation": getattr(self, "text_investigation", None),
-                "text_family_comments": getattr(self, "text_family_comments", None),
-                "text_overall_remarks": getattr(self, "text_overall_remarks", None),
-            }
-            import tkinter as tk
-
-            for key, widget in text_widgets.items():
-                if widget:
-                    widget.config(state="normal")
-                    widget.delete("1.0", tk.END)
-                    widget.insert("1.0", data.get(key, ""))
-
-            self.status_var.set("✓ AI生成完了！")
-            print("=== 画面への反映が完了しました ===")
-
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            self.status_var.set(f"❌ 画面への反映エラー: {e}")
-
-    def _apply_data_to_ui(self, data: dict):
-        if "prof" in data:
-            for k, v in data["prof"].items():
-                if k in self.vars_prof:
-                    self.vars_prof[k].set(v)
-        if "main_stats" in data:
-            for stat, vals in data["main_stats"].items():
-                if stat in self.vars_main_stats:
-                    for k, v in vals.items():
-                        if k in self.vars_main_stats[stat]:
-                            self.vars_main_stats[stat][k].set(int(v))
-        if "sub_stats" in data:
-            for stat, vals in data["sub_stats"].items():
-                if stat in self.vars_sub_stats:
-                    for k, v in vals.items():
-                        if k in self.vars_sub_stats[stat]:
-                            self.vars_sub_stats[stat][k].set(int(v))
-        if "combat_mods" in data:
-            for k, v in data["combat_mods"].items():
-                if k in self.vars_combat_mods:
-                    self.vars_combat_mods[k].set(int(v))
-        if "equip" in data:
-            for k, v in data["equip"].items():
-                if k in self.vars_equip:
-                    self.vars_equip[k].set(v)
-        if "skills" in data:
-            for s in self.vars_skills:
-                for k in s.keys():
-                    s[k].set("")
-            for i, s_data in enumerate(data["skills"]):
-                if i < len(self.vars_skills):
-                    for k, v in s_data.items():
-                        if k in self.vars_skills[i]:
-                            self.vars_skills[i][k].set(str(v))
-        if "inventory" in data:
-            for i, i_data in enumerate(data["inventory"]):
-                if i < len(self.vars_inventory):
-                    for k, v in i_data.items():
-                        if k in self.vars_inventory[i]:
-                            self.vars_inventory[i][k].set(v)
-        if "accessories" in data:
-            for i, a_data in enumerate(data["accessories"]):
-                if i < len(self.vars_accessories):
-                    for k, v in a_data.items():
-                        if k in self.vars_accessories[i]:
-                            self.vars_accessories[i][k].set(v)
-        if "lore" in data:
-            for k, v in data["lore"].items():
-                if k in self.vars_lore:
-                    self.vars_lore[k].set(v)
-
-        text_widgets = {
-            "text_history": self.text_history,
-            "text_career": self.text_career,
-            "text_attendance": self.text_attendance,
-            "text_health": self.text_health,
-            "text_curse_remarks": self.text_curse_remarks,
-            "text_impairment_remarks": self.text_impairment_remarks,
-            "text_seminary_report": self.text_seminary_report,
-            "text_investigation": self.text_investigation,
-            "text_family_comments": self.text_family_comments,
-            "text_overall_remarks": self.text_overall_remarks,
-            "memo": self.text_memo,
-        }
-        for key, widget in text_widgets.items():
-            widget.config(state="normal")
-            widget.delete("1.0", tk.END)
-            widget.insert("1.0", data.get(key, ""))
+    # ---- CCFolia出力 ----
 
     def _copy_ccfolia(self):
-        name = self.vars_prof["name"].get()
-        memo_text = f"【二つ名】{self.vars_prof['alias'].get()}\n【種族】{self.vars_prof['race'].get()} 【年齢】{self.vars_prof['age'].get()}\n"
-        memo_text += f"【身体特徴】{self.vars_lore['height'].get()} / {self.vars_lore['weight'].get()} / {self.vars_lore['blood_type'].get()}\n"
-        memo_text += f"【履歴】\n{self.text_history.get('1.0', tk.END).strip()}\n\n"
-        memo_text += "■ 特技・スキル ■\n"
-        for s in self.vars_skills:
-            if s["name"].get() and s["name"].get() != "なし":
-                memo_text += (
-                    f"・{s['name'].get()} (コスト:{s['cost'].get()}) : {s['effect'].get()}\n"
-                )
-        memo_text += "\n■ 所持品 ■\n"
-        for item in self.vars_inventory:
-            if item["name"].get() and item["name"].get() != "なし" and item["count"].get() > 0:
-                memo_text += f"・{item['name'].get()} ×{item['count'].get()}\n"
-        memo_text += "\n■ RP用 備品・日用品 ■\n"
-        has_acc = False
-        for acc in self.vars_accessories:
-            if acc["name"].get() and acc["name"].get() != "なし":
-                memo_text += f"・{acc['name'].get()} ({acc['memo'].get()})\n"
-                has_acc = True
-        if not has_acc:
-            memo_text += "特になし\n"
-        if self.text_memo.get("1.0", tk.END).strip():
-            memo_text += f"\n■ メモ ■\n{self.text_memo.get('1.0', tk.END).strip()}"
+        name = self.var_name.get()
+        memo_text = (
+            f"【二つ名】{self.var_alias.get()}\n\n{self.text_memo.get('1.0', tk.END).strip()}"
+        )
 
         commands = "◆能力値を使った判定◆\n"
-        commands += f"({{体}}+{self.vars_combat_mods['anti_body'].get()})b6=>4  //【体】対敵判定\n"
-        commands += f"({{霊}}+{self.vars_combat_mods['anti_soul'].get()})b6=>4  //【霊】対敵判定\n"
-        commands += f"({{巧}}+{self.vars_combat_mods['anti_skill'].get()})b6=>4  //【巧】対敵判定\n"
-        commands += (
-            f"({{術}}+{self.vars_combat_mods['anti_magic'].get()})b6=>4  //【術】対敵判定\n\n"
-        )
+        commands += "{体}b6=>4  //【体】判定\n"
+        commands += "{霊}b6=>4  //【霊】判定\n"
+        commands += "{巧}b6=>4  //【巧】判定\n"
+        commands += "{術}b6=>4  //【術】判定\n\n"
+
         commands += "◆戦闘中用の判定◆\n"
-        commands += f"({{体}}+{self.vars_combat_mods['melee'].get()})b6=>4  //近接攻撃\n"
-        commands += f"({{巧}}+{self.vars_combat_mods['ranged'].get()})b6=>4  //遠隔攻撃\n"
+        commands += "{巧}b6=>4  //戦術機動\n"
+        commands += "({体})b6=>4  //近接攻撃\n"
+        commands += "({巧})b6=>4  //遠隔攻撃\n"
+        commands += "({霊})b6=>4  //霊的攻撃\n"
+        commands += "({術})b6=>4  //術発動\n\n"
+
+        commands += "2d6  //ダメージ\n"
+        commands += "1d3  //霊的ダメージ\n"
         commands += "b6=>4  //回避判定\n\n"
+
         commands += "C({体力})  //残り体力\n"
         commands += "C({霊力})  //残り霊力\n\n"
-        commands += "[Credit: 非公式タクティカル祓魔師キャラクターシートVer0.8]"
 
-        ccfolia_status = [
-            {
-                "label": "体力",
-                "value": self.vars_sub_stats["hp"]["final"].get(),
-                "max": self.vars_sub_stats["hp"]["final"].get(),
-            },
-            {
-                "label": "霊力",
-                "value": self.vars_sub_stats["sp"]["final"].get(),
-                "max": self.vars_sub_stats["sp"]["final"].get(),
-            },
-            {"label": "回避D", "value": 2, "max": 2},
-        ]
-        for item in self.vars_inventory:
-            if item["name"].get() and item["name"].get() != "なし" and item["count"].get() > 0:
-                ccfolia_status.append(
-                    {
-                        "label": item["name"].get(),
-                        "value": item["count"].get(),
-                        "max": item["count"].get(),
-                    }
-                )
+        commands += "◆支給装備◆\n"
+        commands += "【形代】：キャラクターが「死亡」した時、①【形代】を1つ消費することで「死亡」を回避する②【体力】【霊力】を半分まで回復した状態でマップ上の「リスポーン地点」にキャラクターを戻す。　また、手番中に好きなタイミングで【形代】を1つ消費することで、キャラクターは【霊力】を2点回復することができる。\n\n"
+        commands += "【祓串】：1つ消費することで自身を中心とした7*7マスのどこかに配置するか、近接攻撃または遠隔攻撃に使用できる。近接攻撃に使用した場合は1d6点、遠隔攻撃に使用した場合は3点の「物理ダメージ」を与える。\n\n"
+        commands += "【注連鋼縄】：3つ消費することで、【巧】の値を参照してマップ上に設置する。結界に関するルールは2-7：結界の設置についてを参照。\n\n"
+        commands += "【呪瘤檀】：攻撃の代わりにこのアイテムを使用する。自分を中心とした5＊5マスのいずれかのマス1つを「中心」に定め、「中心」と隣接する3＊3のマスにいるキャラクター全員に2点の霊的ダメージを与える（回避は『難易度：NORMAL』）。\n\n"
+
+        commands += "◆特技◆\n"
+        for skill in self._last_json_raw.get("skills", []):
+            commands += f"【{skill.get('name', '')}】：{skill.get('description', '')}\n\n"
+
+        commands += "◆攻撃祭具◆\n"
+        for weapon in self._last_json_raw.get("weapons", []):
+            commands += f"【{weapon.get('name', '')}】：{weapon.get('description', '')}\n\n"
+
+        commands += "[Credit: 非公式タクティカル祓魔師キャラクターシートVer0.8 著作者様]"
 
         ccfolia_data = {
             "kind": "character",
@@ -1448,17 +764,57 @@ class VTTCharMakerTab(ttk.Frame):
                 "initiative": 0,
                 "memo": memo_text,
                 "commands": commands,
-                "status": ccfolia_status,
-                "params": [
-                    {"label": "体", "value": str(self.vars_main_stats["body"]["final"].get())},
-                    {"label": "霊", "value": str(self.vars_main_stats["soul"]["final"].get())},
-                    {"label": "巧", "value": str(self.vars_main_stats["skill"]["final"].get())},
-                    {"label": "術", "value": str(self.vars_main_stats["magic"]["final"].get())},
+                "status": [
+                    {"label": "体力", "value": self.var_hp.get(), "max": self.var_hp.get()},
+                    {"label": "霊力", "value": self.var_sp.get(), "max": self.var_sp.get()},
                     {
-                        "label": "機動力",
-                        "value": str(self.vars_sub_stats["mobility"]["final"].get()),
+                        "label": "回避D",
+                        "value": self.var_evasion.get(),
+                        "max": self.var_evasion.get(),
                     },
-                    {"label": "装甲", "value": str(self.vars_sub_stats["armor"]["final"].get())},
+                    {
+                        "label": "形代",
+                        "value": self.var_katashiro.get(),
+                        "max": self.var_katashiro.get(),
+                    },
+                    {
+                        "label": "祓串",
+                        "value": self.var_haraegushi.get(),
+                        "max": self.var_haraegushi.get(),
+                    },
+                    {
+                        "label": "注連鋼縄",
+                        "value": self.var_shimenawa.get(),
+                        "max": self.var_shimenawa.get(),
+                    },
+                    {
+                        "label": "呪瘤檀",
+                        "value": self.var_juryudan.get(),
+                        "max": self.var_juryudan.get(),
+                    },
+                    {
+                        "label": "医霊器具",
+                        "value": self.var_ireikigu.get(),
+                        "max": self.var_ireikigu.get(),
+                    },
+                    {
+                        "label": "名伏",
+                        "value": self.var_meifuku.get(),
+                        "max": self.var_meifuku.get(),
+                    },
+                    {
+                        "label": "術延起点",
+                        "value": self.var_jutsuyen.get(),
+                        "max": self.var_jutsuyen.get(),
+                    },
+                ],
+                "params": [
+                    {"label": "体", "value": str(self.var_body.get())},
+                    {"label": "霊", "value": str(self.var_soul.get())},
+                    {"label": "巧", "value": str(self.var_skill.get())},
+                    {"label": "術", "value": str(self.var_magic.get())},
+                    {"label": "機動力", "value": str(self.var_mobility.get())},
+                    {"label": "装甲", "value": str(self.var_armor.get())},
                 ],
             },
         }
@@ -1466,9 +822,11 @@ class VTTCharMakerTab(ttk.Frame):
         self.clipboard_clear()
         self.clipboard_append(json.dumps(ccfolia_data, ensure_ascii=False))
         self.update()
+
+        self.status_var.set("✓ ココフォリア用にコピー！Ctrl+Vで貼り付け")
         messagebox.showinfo(
             "コピー完了",
-            "ココフォリア用のクリップボードデータをコピーしました！\nCtrl+Vで貼り付けてください。",
+            "ココフォリア用のクリップボードデータをコピーしました！\n\nココフォリアの画面を開いて Ctrl+V (貼り付け) を押すだけで、見やすいチャットパレット付きの駒が生成されます。",
         )
 
 
