@@ -200,10 +200,12 @@ class CCFoliaConnector:
         default_character_id: str = "meta_gm",
         headless: bool = False,
         poll_interval: float | None = None,
+        use_browser_use: bool = False,
     ) -> None:
         self.room_url = room_url
         self.poll_interval = poll_interval or self.POLL_INTERVAL
         self.headless = headless
+        self._use_browser_use = use_browser_use
 
         self.lm_client = LMClient()
         # 設定ファイルは常にリポジトリルート基準の絶対パスで解決する
@@ -214,8 +216,9 @@ class CCFoliaConnector:
         self.sm = SessionManager(_ROOT_DIR)
         self.world_setting = self._load_world_setting()
 
-        # VTTアダプター（Playwright ベース）
-        self.adapter: CCFoliaAdapter | None = None
+        # VTTアダプター（Playwright ベース or Browser Use ベース）
+        from vtt_adapters.base_adapter import BaseVTTAdapter
+        self.adapter: BaseVTTAdapter | None = None
         self.map_ctrl: CCFoliaMapController | None = None
 
         # KnowledgeManager（RAG + Web検索）
@@ -232,11 +235,30 @@ class CCFoliaConnector:
 
     def _init_adapter(self) -> None:
         """VTTアダプターを初期化してCCFoliaに接続する。"""
-        print("⏳ Playwright でブラウザを起動しています...")
-        self.adapter = CCFoliaAdapter()
+        if self._use_browser_use:
+            print("⏳ Browser Use でブラウザを起動しています...")
+            try:
+                from config import load_config
+                from vtt_adapters.browser_use_adapter import BrowserUseVTTAdapter
+            except ModuleNotFoundError:
+                from core.config import load_config
+                from core.vtt_adapters.browser_use_adapter import BrowserUseVTTAdapter
+            cfg = load_config()
+            api_key = cfg["openai_api_key"] or cfg["anthropic_api_key"]
+            provider = "anthropic" if cfg["anthropic_api_key"] and not cfg["openai_api_key"] else "openai"
+            self.adapter = BrowserUseVTTAdapter(
+                model_name=cfg["browser_use_model"],
+                api_key=api_key,
+                provider=provider,
+                headless=self.headless,
+            )
+        else:
+            print("⏳ Playwright でブラウザを起動しています...")
+            self.adapter = CCFoliaAdapter()
         self.adapter.connect(self.room_url, headless=self.headless)
         self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
-        print(f"✓ CCFoliaに接続: {self.room_url}")
+        mode = "Browser Use" if self._use_browser_use else "Playwright"
+        print(f"✓ CCFoliaに接続 ({mode}): {self.room_url}")
 
     def _init_knowledge(self) -> None:
         """KnowledgeManager を初期化し、世界観データを取り込む。"""
