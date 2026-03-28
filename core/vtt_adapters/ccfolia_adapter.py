@@ -9,7 +9,6 @@ CCFolia のブラウザ操作を実現する。
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -29,7 +28,22 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
-GRID_SIZE = 96
+try:
+    from core.vtt_adapters.playwright_utils import (
+        GRID_SIZE,
+        extract_hash,
+        get_board_state_from_page,
+        parse_xy,
+        spawn_piece_clipboard,
+    )
+except ModuleNotFoundError:
+    from vtt_adapters.playwright_utils import (
+        GRID_SIZE,
+        extract_hash,
+        get_board_state_from_page,
+        parse_xy,
+        spawn_piece_clipboard,
+    )
 
 # CCFolia の CSS セレクタ定数
 _CHAT_INPUT = "textarea"
@@ -217,36 +231,7 @@ class CCFoliaAdapter(BaseVTTAdapter):
 
     def get_board_state(self) -> list[dict]:
         """全駒の位置情報を取得する。"""
-        raw = self.page.evaluate("""() => {
-            const out = [];
-            document.querySelectorAll('.movable').forEach((el, i) => {
-                const t = el.style.transform;
-                if (!t || !t.includes('translate(')) return;
-                const img = el.querySelector('img');
-                const r = el.getBoundingClientRect();
-                out.push({
-                    index: i, transform: t,
-                    imgSrc: img ? img.src : '',
-                    vx: r.left + r.width/2,
-                    vy: r.top  + r.height/2
-                });
-            });
-            return out;
-        }""")
-
-        result: list[dict] = []
-        for p in raw:
-            px_x, px_y = self._parse_xy(p["transform"])
-            result.append({
-                "index": p["index"],
-                "img_hash": self._extract_hash(p["imgSrc"]),
-                "img_url": p["imgSrc"],
-                "px_x": px_x,
-                "px_y": px_y,
-                "grid_x": round(px_x / GRID_SIZE),
-                "grid_y": round(px_y / GRID_SIZE),
-            })
-        return result
+        return get_board_state_from_page(self.page)
 
     # ──────────────────────────────────────────
     # 駒移動
@@ -310,25 +295,7 @@ class CCFoliaAdapter(BaseVTTAdapter):
 
     def spawn_piece(self, character_json: dict) -> bool:
         """キャラクターJSONをクリップボード経由でCCFoliaにペーストして配置する。"""
-        try:
-            json_text = json.dumps(character_json, ensure_ascii=False)
-            # クリップボードにJSONをセット
-            self.page.evaluate(
-                "(text) => navigator.clipboard.writeText(text)", json_text
-            )
-            # ボード領域にフォーカスしてペースト
-            self.page.keyboard.press("Escape")
-            self.page.wait_for_timeout(200)
-            body = self.page.query_selector("body")
-            if body:
-                body.click()
-            self.page.keyboard.press("Control+v")
-            self.page.wait_for_timeout(500)
-            logger.info("駒を配置しました")
-            return True
-        except Exception as e:
-            logger.error("駒配置エラー: %s", e)
-            return False
+        return spawn_piece_clipboard(self.page, character_json)
 
     # ──────────────────────────────────────────
     # チャット操作
@@ -778,11 +745,9 @@ class CCFoliaAdapter(BaseVTTAdapter):
     @staticmethod
     def _parse_xy(style: str | None) -> tuple[int, int]:
         """CSS transform translate(Xpx, Ypx) からピクセル座標を抽出する。"""
-        m = re.search(r"translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)", style or "")
-        return (int(float(m.group(1))), int(float(m.group(2)))) if m else (0, 0)
+        return parse_xy(style)
 
     @staticmethod
     def _extract_hash(url: str | None) -> str:
         """CCFolia画像URLから8文字ハッシュを抽出する。"""
-        m = re.search(r"/(?:shared|files)/([a-f0-9]+)", url or "")
-        return m.group(1)[:8] if m else ""
+        return extract_hash(url)
