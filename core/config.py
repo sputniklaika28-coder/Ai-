@@ -23,4 +23,6 @@ def load_config() -> dict[str, str]:
         "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
         "browser_use_model": os.getenv("BROWSER_USE_MODEL", "gpt-4o"),
         "lm_studio_url": os.getenv("LM_STUDIO_URL", "http://localhost:1234"),
+        "vlm_provider": os.getenv("VLM_PROVIDER", "openai"),
+        "vlm_model": os.getenv("VLM_MODEL", "gpt-4o"),
     }

@@ -104,8 +104,76 @@ KNOWLEDGE_TOOLS: list[dict] = [
     },
 ]
 
+# ==========================================
+# Phase 2: アセット・Vision ツール定義
+# ==========================================
+
+ASSET_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "upload_asset",
+            "description": "ローカルファイルをCCFoliaにアップロードする（画像・BGM）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "アップロードするファイルパス"},
+                    "asset_type": {
+                        "type": "string",
+                        "enum": ["background", "token", "bgm"],
+                        "description": "アセット種別",
+                    },
+                },
+                "required": ["file_path", "asset_type"],
+            },
+        },
+    },
+]
+
+VISION_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_board_vision",
+            "description": "VLMで盤面を視覚的に解析し、Canvas上の駒や地形を検出する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "解析の焦点（省略可）"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "place_piece_at_location",
+            "description": "自然言語で指定した位置にコマを配置する（VLMで座標を特定）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "配置位置の説明（例: 十字路、部屋の中央）"},
+                    "character_json": {
+                        "type": "object",
+                        "description": "CCFolia形式のキャラクターデータ",
+                    },
+                },
+                "required": ["description", "character_json"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_board_scene",
+            "description": "VLMで現在の盤面状態を自然言語で説明する",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
 # 全ツール結合
-ALL_TOOLS: list[dict] = AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS
+ALL_TOOLS: list[dict] = AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS + ASSET_TOOLS + VISION_TOOLS
 
 
 # ==========================================
@@ -352,6 +420,45 @@ class CCFoliaConnector:
                 results = self.knowledge_manager.search_web(tool_args.get("query", ""))
                 return False, json.dumps(results, ensure_ascii=False)
             return False, json.dumps({"error": "KnowledgeManager が未初期化です"})
+
+        # アセットアップロードツール
+        if tool_name == "upload_asset" and self.adapter and self._use_browser_use:
+            try:
+                url = self.adapter.upload_asset(
+                    tool_args.get("file_path", ""),
+                    tool_args.get("asset_type", "background"),
+                )
+                return False, json.dumps({"url": url or "", "ok": url is not None})
+            except NotImplementedError:
+                return False, json.dumps({"error": "このアダプターは upload_asset に対応していません"})
+
+        # VLM Vision ツール
+        if tool_name == "analyze_board_vision" and self.adapter and self._use_browser_use:
+            try:
+                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
+                pieces = vision.analyze_board(tool_args.get("query", ""))
+                return False, json.dumps(pieces, ensure_ascii=False, default=str)
+            except (NotImplementedError, AttributeError):
+                return False, json.dumps({"error": "Vision 機能が利用できません"})
+
+        if tool_name == "place_piece_at_location" and self.adapter and self._use_browser_use:
+            try:
+                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
+                ok = vision.place_piece_at_visual_location(
+                    tool_args.get("description", ""),
+                    tool_args.get("character_json", {}),
+                )
+                return False, json.dumps({"ok": ok})
+            except (NotImplementedError, AttributeError):
+                return False, json.dumps({"error": "Vision 機能が利用できません"})
+
+        if tool_name == "describe_board_scene" and self.adapter and self._use_browser_use:
+            try:
+                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
+                desc = vision.describe_scene()
+                return False, json.dumps({"description": desc})
+            except (NotImplementedError, AttributeError):
+                return False, json.dumps({"error": "Vision 機能が利用できません"})
 
         # マップ操作ツール
         if self.map_ctrl:

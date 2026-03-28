@@ -14,7 +14,9 @@ try:
     from core.vtt_adapters.base_adapter import BaseVTTAdapter
     from core.vtt_adapters.playwright_utils import (
         GRID_SIZE,
+        clip_screenshot,
         get_board_state_from_page,
+        get_canvas_bounds,
         spawn_piece_clipboard,
     )
 except ModuleNotFoundError:
@@ -22,7 +24,9 @@ except ModuleNotFoundError:
     from vtt_adapters.base_adapter import BaseVTTAdapter  # type: ignore[no-redef]
     from vtt_adapters.playwright_utils import (  # type: ignore[no-redef]
         GRID_SIZE,
+        clip_screenshot,
         get_board_state_from_page,
+        get_canvas_bounds,
         spawn_piece_clipboard,
     )
 
@@ -234,3 +238,41 @@ class BrowserUseVTTAdapter(BaseVTTAdapter):
         """Browser Use で背景画像を変更する。"""
         task = self._agent.format_task("set_background", image_url=image_url)
         return self._agent.run_task_sync(task)
+
+    # ──────────────────────────────────────────
+    # Phase 2: アセットアップロード / Canvas Vision
+    # ──────────────────────────────────────────
+
+    def upload_asset(self, file_path: str, asset_type: str) -> str | None:
+        """AssetUploader 経由でファイルをアップロードする。"""
+        try:
+            from core.asset_uploader import AssetUploader
+        except ModuleNotFoundError:
+            from asset_uploader import AssetUploader  # type: ignore[no-redef]
+        uploader = AssetUploader(page=self.page, agent=self._agent)
+        if asset_type == "bgm":
+            return uploader.upload_audio(file_path)
+        return uploader.upload_image(file_path, asset_type)
+
+    def take_canvas_screenshot(self) -> bytes | None:
+        """Canvas / ボード領域のみのスクリーンショットを取得する。"""
+        bounds = get_canvas_bounds(self.page)
+        if bounds:
+            return clip_screenshot(self.page, bounds)
+        return self.take_screenshot()
+
+    def get_vision_controller(self) -> object:
+        """VisionCanvasController のインスタンスを生成して返す。"""
+        try:
+            from core.config import load_config
+            from core.vision_canvas_controller import VisionCanvasController
+        except ModuleNotFoundError:
+            from config import load_config  # type: ignore[no-redef]
+            from vision_canvas_controller import VisionCanvasController  # type: ignore[no-redef]
+        cfg = load_config()
+        return VisionCanvasController(
+            page=self.page,
+            cloud_api_key=cfg.get("openai_api_key", ""),
+            cloud_model=cfg.get("vlm_model", "gpt-4o"),
+            vlm_provider=cfg.get("vlm_provider", "openai"),
+        )
