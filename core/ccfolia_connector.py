@@ -172,8 +172,77 @@ VISION_TOOLS: list[dict] = [
     },
 ]
 
+ROOM_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "build_room",
+            "description": "構造化定義からCCFoliaルームを自動構築する（背景・BGM・キャラクター一括配置）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "room_definition": {
+                        "type": "object",
+                        "description": "ルーム定義（name, background_image, bgm, characters）",
+                    },
+                },
+                "required": ["room_definition"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_room_background",
+            "description": "現在のルームの背景画像をアップロードして設定する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "背景画像のローカルパス"},
+                },
+                "required": ["image_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_room_bgm",
+            "description": "ルームにBGMを追加する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "音声ファイルパス"},
+                    "name": {"type": "string", "description": "BGM名"},
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "place_room_character",
+            "description": "ルームにキャラクターを配置する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "キャラクター名"},
+                    "position": {"type": "string", "description": "配置位置の説明（自然言語）"},
+                    "grid_x": {"type": "integer", "description": "グリッドX座標（省略可）"},
+                    "grid_y": {"type": "integer", "description": "グリッドY座標（省略可）"},
+                    "ccfolia_data": {"type": "object", "description": "CCFolia形式キャラクターデータ"},
+                },
+                "required": ["name", "ccfolia_data"],
+            },
+        },
+    },
+]
+
 # 全ツール結合
-ALL_TOOLS: list[dict] = AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS + ASSET_TOOLS + VISION_TOOLS
+ALL_TOOLS: list[dict] = (
+    AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS + ASSET_TOOLS + VISION_TOOLS + ROOM_TOOLS
+)
 
 
 # ==========================================
@@ -459,6 +528,57 @@ class CCFoliaConnector:
                 return False, json.dumps({"description": desc})
             except (NotImplementedError, AttributeError):
                 return False, json.dumps({"error": "Vision 機能が利用できません"})
+
+        # ルーム構築ツール
+        if tool_name == "build_room" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import RoomBuilder, RoomDefinition
+                builder = RoomBuilder(adapter=self.adapter)
+                defn = RoomDefinition.from_dict(tool_args.get("room_definition", {}))
+                results = builder.build_room(defn)
+                summary = [
+                    {"step": r.step, "success": r.success, "detail": r.detail, "error": r.error}
+                    for r in results
+                ]
+                return False, json.dumps({"results": summary}, ensure_ascii=False)
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "set_room_background" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import RoomBuilder
+                builder = RoomBuilder(adapter=self.adapter)
+                r = builder.set_background(tool_args.get("image_path", ""))
+                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "add_room_bgm" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import RoomBuilder
+                builder = RoomBuilder(adapter=self.adapter)
+                r = builder.add_bgm(
+                    tool_args.get("file_path", ""), tool_args.get("name", ""),
+                )
+                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "place_room_character" and self.adapter and self._use_browser_use:
+            try:
+                from room_builder import CharacterPlacement, RoomBuilder
+                builder = RoomBuilder(adapter=self.adapter)
+                char = CharacterPlacement(
+                    name=tool_args.get("name", ""),
+                    position=tool_args.get("position", ""),
+                    grid_x=tool_args.get("grid_x"),
+                    grid_y=tool_args.get("grid_y"),
+                    ccfolia_data=tool_args.get("ccfolia_data", {}),
+                )
+                r = builder.place_character(char)
+                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
 
         # マップ操作ツール
         if self.map_ctrl:
