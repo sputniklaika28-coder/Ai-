@@ -239,9 +239,66 @@ ROOM_TOOLS: list[dict] = [
     },
 ]
 
+COPILOT_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "transition_scene",
+            "description": "登録済みシーンに遷移する（背景・BGM・キャラクター一括変更）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scene_name": {"type": "string", "description": "遷移先のシーン名"},
+                },
+                "required": ["scene_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_scenes",
+            "description": "登録済みシーンの一覧を取得する",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_scene",
+            "description": "新しいシーンを登録する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scene_definition": {
+                        "type": "object",
+                        "description": "シーン定義（name, background_image, bgm, characters）",
+                    },
+                },
+                "required": ["scene_definition"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_copilot_mode",
+            "description": "コパイロットのモードを切り替える（auto: 自動実行, assist: 提案のみ）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["auto", "assist"]},
+                },
+                "required": ["mode"],
+            },
+        },
+    },
+]
+
 # 全ツール結合
 ALL_TOOLS: list[dict] = (
-    AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS + ASSET_TOOLS + VISION_TOOLS + ROOM_TOOLS
+    AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS
+    + ASSET_TOOLS + VISION_TOOLS + ROOM_TOOLS + COPILOT_TOOLS
 )
 
 
@@ -366,6 +423,9 @@ class CCFoliaConnector:
         self._running = False
         self._stdin_queue: queue.Queue[dict] = queue.Queue()
 
+        # セッション・コパイロット（Phase 4）
+        self._copilot: object | None = None
+
     # ──────────────────────────────────────────
     # 初期化 / 終了
     # ──────────────────────────────────────────
@@ -396,6 +456,20 @@ class CCFoliaConnector:
         self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
         mode = "Browser Use" if self._use_browser_use else "Playwright"
         print(f"✓ CCFoliaに接続 ({mode}): {self.room_url}")
+
+    def _init_copilot(self) -> None:
+        """SessionCoPilot を初期化する。"""
+        try:
+            from session_copilot import SessionCoPilot
+            self._copilot = SessionCoPilot(adapter=self.adapter, mode="auto")
+            # シーン定義ファイルがあれば読み込む
+            scenes_path = self.sm.configs_dir / "scenes.json"
+            if scenes_path.exists():
+                count = self._copilot.load_scenes_from_file(str(scenes_path))
+                print(f"✓ シーン定義を {count} 件読み込みました")
+            logger.info("SessionCoPilot 初期化完了")
+        except Exception as e:
+            logger.warning("SessionCoPilot 初期化エラー: %s", e)
 
     def _init_knowledge(self) -> None:
         """KnowledgeManager を初期化し、世界観データを取り込む。"""
@@ -579,6 +653,28 @@ class CCFoliaConnector:
                 return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
             except Exception as e:
                 return False, json.dumps({"error": str(e)})
+
+        # コパイロットツール
+        if tool_name == "transition_scene" and self._copilot:
+            results = self._copilot.transition_to(tool_args.get("scene_name", ""))
+            return False, json.dumps({"results": results}, ensure_ascii=False)
+
+        if tool_name == "list_scenes" and self._copilot:
+            scenes = self._copilot.list_scenes()
+            return False, json.dumps({"scenes": scenes}, ensure_ascii=False)
+
+        if tool_name == "register_scene" and self._copilot:
+            try:
+                from session_copilot import SceneDefinition
+                defn = SceneDefinition.from_dict(tool_args.get("scene_definition", {}))
+                self._copilot.register_scene(defn)
+                return False, json.dumps({"ok": True, "scene": defn.name})
+            except Exception as e:
+                return False, json.dumps({"error": str(e)})
+
+        if tool_name == "set_copilot_mode" and self._copilot:
+            self._copilot.mode = tool_args.get("mode", "auto")
+            return False, json.dumps({"ok": True, "mode": self._copilot.mode})
 
         # マップ操作ツール
         if self.map_ctrl:
@@ -782,6 +878,16 @@ class CCFoliaConnector:
                     self.ctx.add_message(speaker, body)
                     print(f"\n📨 新着: [{speaker}] {body[:40]}")
 
+                    # コパイロットのイベントルール処理
+                    if self._copilot:
+                        try:
+                            actions = self._copilot.process_message(speaker, body)
+                            for a in actions:
+                                status = "✓" if a.success else "✗"
+                                print(f"   🤖 [{status}] ルール '{a.rule_name}': {a.detail or a.error}")
+                        except Exception as e:
+                            logger.error("コパイロット処理エラー: %s", e)
+
                     trigger_gt = "＞" in body
                     trigger_kw = any(k in body for k in keywords) if keywords else False
                     print(f"   DEBUG: トリガー判定: '＞'={trigger_gt}, キーワード={trigger_kw}")
@@ -875,6 +981,7 @@ class CCFoliaConnector:
         self.sm.start_new_session("CCFoliaSession")
         self._init_adapter()
         self._init_knowledge()
+        self._init_copilot()
         self._running = True
 
         # stdin監視だけ別スレッド（Playwright を触らない）

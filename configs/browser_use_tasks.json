@@ -19,5 +19,7 @@
   "vision_describe_scene": "あなたはTRPGバーチャルテーブルトップの盤面画像を見ています。\n現在の盤面の状態を日本語で詳しく説明してください。\n背景、駒の配置、マップの特徴などを記述してください。",
 
   "set_room_name": "CCFoliaのルーム設定を開き、ルーム名を「{room_name}」に変更してください。\n手順: 1) ルーム設定を開く 2) ルーム名欄を見つけて変更 3) 保存",
-  "set_room_description": "CCFoliaのルーム設定を開き、ルーム説明文を設定してください。\n説明文: {description}\n手順: 1) ルーム設定を開く 2) 説明欄に入力 3) 保存"
+  "set_room_description": "CCFoliaのルーム設定を開き、ルーム説明文を設定してください。\n説明文: {description}\n手順: 1) ルーム設定を開く 2) 説明欄に入力 3) 保存",
+
+  "scene_transition_narration": "シーンが「{scene_name}」に遷移します。\n以下の情景描写をCCFoliaのチャット欄にGMとして投稿してください:\n{narration}\n手順: 1) GM名義でチャット欄に入力 2) 送信"
 }
