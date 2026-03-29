@@ -252,12 +252,29 @@ class VisionCanvasController:
     # VLM バックエンド
     # ──────────────────────────────────────────
 
+    def _ensure_local_vlm(self) -> None:
+        """ローカル VLM クライアントが未設定なら自動生成する。"""
+        if self._lm_client is not None:
+            return
+        try:
+            try:
+                from core.lm_client import LMClient
+            except ModuleNotFoundError:
+                from lm_client import LMClient  # type: ignore[no-redef]
+            self._lm_client = LMClient()
+        except Exception as e:
+            logger.warning("ローカル VLM クライアントの初期化に失敗: %s", e)
+
     def _call_vlm(self, prompt: str, image_b64: str) -> str:
         """設定に応じた VLM バックエンドを呼び出す。"""
-        if self._vlm_provider == "local" and self._lm_client is not None:
-            return self._call_local_vlm(prompt, image_b64)
+        if self._vlm_provider == "local":
+            self._ensure_local_vlm()
+            if self._lm_client is not None:
+                return self._call_local_vlm(prompt, image_b64)
         if self._cloud_api_key:
             return self._call_cloud_vlm(prompt, image_b64)
+        # フォールバック: ローカル VLM を試行
+        self._ensure_local_vlm()
         if self._lm_client is not None:
             return self._call_local_vlm(prompt, image_b64)
         logger.error("VLM バックエンドが設定されていません")

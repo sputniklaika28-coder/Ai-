@@ -1654,18 +1654,20 @@ class EnvSettingsTab(ttk.Frame):
 
     # 設定項目の定義: (envキー, ラベル, デフォルト値, 説明, 入力タイプ)
     _FIELDS = [
-        ("OPENAI_API_KEY", "OpenAI API Key", "sk-...", "Browser Use + VLM に必要", "password"),
-        ("ANTHROPIC_API_KEY", "Anthropic API Key", "", "Claude 利用時（任意）", "password"),
-        ("BROWSER_USE_MODEL", "Browser Use モデル", "gpt-4o", "Browser Use の推論モデル", "combo"),
+        ("BROWSER_USE_PROVIDER", "Browser Use プロバイダー", "local", "Browser Use の推論エンジン", "combo"),
+        ("BROWSER_USE_MODEL", "Browser Use モデル", "", "モデル名（空欄=自動選択）", "combo"),
         ("LM_STUDIO_URL", "LM Studio URL", "http://localhost:1234", "ローカル LLM サーバー", "entry"),
-        ("VLM_PROVIDER", "VLM プロバイダー", "openai", "Canvas 解析用 VLM", "combo"),
-        ("VLM_MODEL", "VLM モデル", "gpt-4o", "VLM のモデル名", "combo"),
+        ("VLM_PROVIDER", "VLM プロバイダー", "local", "Canvas 解析用 VLM", "combo"),
+        ("VLM_MODEL", "VLM モデル", "", "VLM モデル名（空欄=自動選択）", "combo"),
+        ("OPENAI_API_KEY", "OpenAI API Key", "", "クラウド利用時（任意）", "password"),
+        ("ANTHROPIC_API_KEY", "Anthropic API Key", "", "クラウド利用時（任意）", "password"),
     ]
 
     _COMBO_OPTIONS = {
-        "BROWSER_USE_MODEL": ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514"],
-        "VLM_PROVIDER": ["openai", "local"],
-        "VLM_MODEL": ["gpt-4o", "gpt-4o-mini"],
+        "BROWSER_USE_PROVIDER": ["local", "openai", "anthropic"],
+        "BROWSER_USE_MODEL": ["", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514"],
+        "VLM_PROVIDER": ["local", "openai"],
+        "VLM_MODEL": ["", "gpt-4o", "gpt-4o-mini"],
     }
 
     def __init__(self, parent):
