@@ -441,13 +441,19 @@ class CCFoliaConnector:
                 from core.config import load_config
                 from core.vtt_adapters.browser_use_adapter import BrowserUseVTTAdapter
             cfg = load_config()
-            api_key = cfg["openai_api_key"] or cfg["anthropic_api_key"]
-            provider = "anthropic" if cfg["anthropic_api_key"] and not cfg["openai_api_key"] else "openai"
+            provider = cfg.get("browser_use_provider", "local")
+            api_key = ""
+            if provider == "anthropic":
+                api_key = cfg["anthropic_api_key"]
+            elif provider == "openai":
+                api_key = cfg["openai_api_key"]
+            # provider == "local" の場合は api_key 不要
             self.adapter = BrowserUseVTTAdapter(
                 model_name=cfg["browser_use_model"],
                 api_key=api_key,
                 provider=provider,
                 headless=self.headless,
+                lm_studio_url=cfg.get("lm_studio_url", "http://localhost:1234"),
             )
         else:
             print("⏳ Playwright でブラウザを起動しています...")

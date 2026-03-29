@@ -60,10 +60,11 @@ class BrowserUseAgentWrapper:
 
     def __init__(
         self,
-        model_name: str = "gpt-4o",
+        model_name: str = "",
         api_key: str = "",
-        provider: str = "openai",
+        provider: str = "local",
         headless: bool = False,
+        lm_studio_url: str = "http://localhost:1234",
     ) -> None:
         if not _HAS_BROWSER_USE:
             raise ModuleNotFoundError(
@@ -77,9 +78,16 @@ class BrowserUseAgentWrapper:
 
         # LLM の初期化
         if provider == "anthropic":
-            self._llm = ChatAnthropic(model=model_name, api_key=api_key)  # type: ignore[arg-type]
+            self._llm = ChatAnthropic(model=model_name or "claude-sonnet-4-20250514", api_key=api_key)  # type: ignore[arg-type]
+        elif provider == "local":
+            # LM Studio 等の OpenAI 互換ローカルサーバーに接続
+            self._llm = ChatOpenAI(
+                model=model_name or "",  # type: ignore[arg-type]
+                api_key="lm-studio",
+                base_url=f"{lm_studio_url}/v1",
+            )
         else:
-            self._llm = ChatOpenAI(model=model_name, api_key=api_key)  # type: ignore[arg-type]
+            self._llm = ChatOpenAI(model=model_name or "gpt-4o", api_key=api_key)  # type: ignore[arg-type]
 
         # Browser Use のブラウザ設定
         self._browser_config = BrowserConfig(

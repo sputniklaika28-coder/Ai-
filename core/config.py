@@ -39,8 +39,9 @@ def _ensure_env_file() -> None:
             file=sys.stderr,
         )
     print(
-        "   ➡ configs/.env を開いて OPENAI_API_KEY または "
-        "ANTHROPIC_API_KEY を設定してください。",
+        "   ➡ configs/.env を開いて設定を確認してください。\n"
+        "   ➡ ローカル LLM のみで動作可能です（LM Studio 等）。\n"
+        "   ➡ クラウド API を使う場合は OPENAI_API_KEY 等を設定してください。",
         file=sys.stderr,
     )
 
@@ -52,8 +53,9 @@ def load_config() -> dict[str, str]:
     return {
         "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
         "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
-        "browser_use_model": os.getenv("BROWSER_USE_MODEL", "gpt-4o"),
+        "browser_use_model": os.getenv("BROWSER_USE_MODEL", ""),
+        "browser_use_provider": os.getenv("BROWSER_USE_PROVIDER", "local"),
         "lm_studio_url": os.getenv("LM_STUDIO_URL", "http://localhost:1234"),
-        "vlm_provider": os.getenv("VLM_PROVIDER", "openai"),
-        "vlm_model": os.getenv("VLM_MODEL", "gpt-4o"),
+        "vlm_provider": os.getenv("VLM_PROVIDER", "local"),
+        "vlm_model": os.getenv("VLM_MODEL", ""),
     }
