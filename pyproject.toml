@@ -50,6 +50,7 @@ markers = [
     "gui: marks tests that require tkinter (deselect with '-m not gui')",
     "integration: marks tests that require a live LM Studio server",
     "browser_use: marks tests that require Browser Use + cloud API",
+    "e2e: marks end-to-end tests that require full CCFolia + LLM + browser environment",
 ]
 
 # ──────────────────────────────────────────
