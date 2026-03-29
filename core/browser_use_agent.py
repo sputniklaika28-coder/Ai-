@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 # Browser Use / LangChain の遅延インポート（optional dependency）
 _HAS_BROWSER_USE = False
 try:
-    from browser_use import Agent, Browser, BrowserConfig
+    from browser_use import Agent, Browser, BrowserProfile
     from langchain_anthropic import ChatAnthropic
     from langchain_openai import ChatOpenAI
 
     _HAS_BROWSER_USE = True
 except ModuleNotFoundError:
-    Agent = Browser = BrowserConfig = None  # type: ignore[assignment,misc]
+    Agent = Browser = BrowserProfile = None  # type: ignore[assignment,misc]
     ChatOpenAI = ChatAnthropic = None  # type: ignore[assignment,misc]
 
 _TASKS_PATH = Path(__file__).resolve().parent.parent / "configs" / "browser_use_tasks.json"
@@ -82,7 +82,7 @@ class BrowserUseAgentWrapper:
             self._llm = ChatOpenAI(model=model_name, api_key=api_key)  # type: ignore[arg-type]
 
         # Browser Use のブラウザ設定
-        self._browser_config = BrowserConfig(
+        self._browser_profile = BrowserProfile(
             headless=headless,
         )
         self._browser: Browser | None = None  # type: ignore[assignment]
@@ -91,7 +91,7 @@ class BrowserUseAgentWrapper:
     async def _ensure_browser(self) -> Browser:  # type: ignore[return]
         """Browser インスタンスを初期化（遅延）。"""
         if self._browser is None:
-            self._browser = Browser(config=self._browser_config)
+            self._browser = Browser(config=self._browser_profile)
         return self._browser
 
     async def _run_task(
