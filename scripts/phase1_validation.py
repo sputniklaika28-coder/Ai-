@@ -53,6 +53,11 @@ def main() -> None:
     api_key = cfg["openai_api_key"] or cfg["anthropic_api_key"]
     if not api_key:
         print("❌ configs/.env に OPENAI_API_KEY または ANTHROPIC_API_KEY を設定してください")
+        print("   手順:")
+        print("   1. configs/.env をテキストエディタで開く")
+        print("   2. OPENAI_API_KEY=sk-... の行に実際のキーを入力")
+        print("      または ANTHROPIC_API_KEY=sk-ant-... を設定")
+        print("   3. このスクリプトを再実行")
         sys.exit(1)
 
     provider = "anthropic" if cfg["anthropic_api_key"] and not cfg["openai_api_key"] else "openai"
