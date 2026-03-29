@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 # Browser Use / LangChain の遅延インポート（optional dependency）
 _HAS_BROWSER_USE = False
 try:
-    from browser_use import Agent, Browser, BrowserConfig
+    from browser_use import Agent, Browser, BrowserProfile
     from langchain_anthropic import ChatAnthropic
     from langchain_openai import ChatOpenAI
 
     _HAS_BROWSER_USE = True
 except ModuleNotFoundError:
-    Agent = Browser = BrowserConfig = None  # type: ignore[assignment,misc]
+    Agent = Browser = BrowserProfile = None  # type: ignore[assignment,misc]
     ChatOpenAI = ChatAnthropic = None  # type: ignore[assignment,misc]
 
 _TASKS_PATH = Path(__file__).resolve().parent.parent / "configs" / "browser_use_tasks.json"
@@ -90,7 +90,7 @@ class BrowserUseAgentWrapper:
             self._llm = ChatOpenAI(model=model_name or "gpt-4o", api_key=api_key)  # type: ignore[arg-type]
 
         # Browser Use のブラウザ設定
-        self._browser_config = BrowserConfig(
+        self._browser_config = BrowserProfile(
             headless=headless,
         )
         self._browser: Browser | None = None  # type: ignore[assignment]
