@@ -1642,6 +1642,317 @@ class GeneratorTab(ttk.Frame):
 
 
 # ==========================================
+# タブ: 環境設定 (.env GUI エディター + LM Studio 接続テスト)
+# ==========================================
+
+
+class EnvSettingsTab(ttk.Frame):
+    """configs/.env を GUI で編集し、LM Studio 接続テストも行うタブ。"""
+
+    _ENV_PATH = CONFIGS_DIR / ".env"
+    _ENV_EXAMPLE = CONFIGS_DIR / ".env.example"
+
+    # 設定項目の定義: (envキー, ラベル, デフォルト値, 説明, 入力タイプ)
+    _FIELDS = [
+        ("OPENAI_API_KEY", "OpenAI API Key", "sk-...", "Browser Use + VLM に必要", "password"),
+        ("ANTHROPIC_API_KEY", "Anthropic API Key", "", "Claude 利用時（任意）", "password"),
+        ("BROWSER_USE_MODEL", "Browser Use モデル", "gpt-4o", "Browser Use の推論モデル", "combo"),
+        ("LM_STUDIO_URL", "LM Studio URL", "http://localhost:1234", "ローカル LLM サーバー", "entry"),
+        ("VLM_PROVIDER", "VLM プロバイダー", "openai", "Canvas 解析用 VLM", "combo"),
+        ("VLM_MODEL", "VLM モデル", "gpt-4o", "VLM のモデル名", "combo"),
+    ]
+
+    _COMBO_OPTIONS = {
+        "BROWSER_USE_MODEL": ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514"],
+        "VLM_PROVIDER": ["openai", "local"],
+        "VLM_MODEL": ["gpt-4o", "gpt-4o-mini"],
+    }
+
+    def __init__(self, parent):
+        super().__init__(parent, padding=12)
+        self._vars: dict[str, tk.StringVar] = {}
+        self._build_ui()
+        self._load_env()
+
+    def _build_ui(self):
+        # --- API キー / モデル設定 ---
+        frm = ttk.LabelFrame(self, text="環境設定 (configs/.env)", padding=10)
+        frm.pack(fill=tk.X, pady=(0, 8))
+        frm.columnconfigure(1, weight=1)
+
+        for i, (key, label, default, desc, input_type) in enumerate(self._FIELDS):
+            ttk.Label(frm, text=label).grid(row=i, column=0, sticky="w", padx=8, pady=4)
+
+            var = tk.StringVar(value=default)
+            self._vars[key] = var
+
+            if input_type == "password":
+                ent = ttk.Entry(frm, textvariable=var, width=50, show="*")
+                ent.grid(row=i, column=1, sticky="ew", padx=4)
+                # トグルボタン
+                btn = ttk.Button(frm, text="表示", width=5)
+                btn.grid(row=i, column=2, padx=2)
+                btn.config(command=lambda e=ent, b=btn: self._toggle_show(e, b))
+            elif input_type == "combo":
+                cb = ttk.Combobox(frm, textvariable=var, width=30,
+                                  values=self._COMBO_OPTIONS.get(key, []))
+                cb.grid(row=i, column=1, sticky="w", padx=4)
+            else:
+                ttk.Entry(frm, textvariable=var, width=50).grid(
+                    row=i, column=1, sticky="ew", padx=4)
+
+            ttk.Label(frm, text=desc, foreground="gray").grid(
+                row=i, column=3, sticky="w", padx=4)
+
+        # --- ボタン群 ---
+        btn_frm = ttk.Frame(self)
+        btn_frm.pack(fill=tk.X, pady=8)
+
+        ttk.Button(btn_frm, text="保存", command=self._save_env, width=12).pack(
+            side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_frm, text="再読み込み", command=self._load_env, width=12).pack(
+            side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_frm, text=".env.example からコピー", command=self._copy_example,
+                   width=22).pack(side=tk.LEFT, padx=(0, 8))
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(btn_frm, textvariable=self.status_var, foreground="green").pack(
+            side=tk.LEFT, padx=12)
+
+        # --- LM Studio 接続テスト ---
+        lm_frm = ttk.LabelFrame(self, text="ローカル AI (LM Studio) 接続テスト", padding=10)
+        lm_frm.pack(fill=tk.X, pady=(0, 8))
+        lm_frm.columnconfigure(1, weight=1)
+
+        self.lm_result_var = tk.StringVar(value="未確認")
+        ttk.Label(lm_frm, text="接続状態:").grid(row=0, column=0, sticky="w", padx=8)
+        self.lm_result_label = ttk.Label(
+            lm_frm, textvariable=self.lm_result_var, font=("", 10, "bold"))
+        self.lm_result_label.grid(row=0, column=1, sticky="w", padx=8)
+        ttk.Button(lm_frm, text="接続テスト", command=self._test_lm_studio, width=12).grid(
+            row=0, column=2, padx=8)
+
+        self.lm_models_var = tk.StringVar(value="")
+        ttk.Label(lm_frm, text="利用可能モデル:").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(lm_frm, textvariable=self.lm_models_var, wraplength=500).grid(
+            row=1, column=1, columnspan=2, sticky="w", padx=8)
+
+    @staticmethod
+    def _toggle_show(entry, button):
+        if entry.cget("show") == "*":
+            entry.config(show="")
+            button.config(text="隠す")
+        else:
+            entry.config(show="*")
+            button.config(text="表示")
+
+    def _load_env(self):
+        """既存の .env ファイルを読み込んで GUI に反映する。"""
+        if not self._ENV_PATH.exists():
+            self.status_var.set(".env ファイルが見つかりません")
+            return
+
+        try:
+            with open(self._ENV_PATH, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, _, value = line.partition("=")
+                        key = key.strip()
+                        value = value.strip()
+                        if key in self._vars:
+                            self._vars[key].set(value)
+            self.status_var.set("✓ 読み込み完了")
+        except Exception as e:
+            self.status_var.set(f"読み込みエラー: {e}")
+
+    def _save_env(self):
+        """GUI の値を .env ファイルに保存する。"""
+        CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            lines = [
+                "# 環境設定 — GUI から自動生成",
+                "# 手動編集も可能です",
+                "",
+            ]
+            for key, _label, _default, desc, _ in self._FIELDS:
+                value = self._vars[key].get().strip()
+                if value:
+                    lines.append(f"# {desc}")
+                    lines.append(f"{key}={value}")
+                else:
+                    lines.append(f"# {key}=")
+                lines.append("")
+
+            with open(self._ENV_PATH, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+            self.status_var.set("✓ 保存しました")
+        except Exception as e:
+            self.status_var.set(f"保存エラー: {e}")
+
+    def _copy_example(self):
+        """env.example から .env にコピーする。"""
+        if not self._ENV_EXAMPLE.exists():
+            self.status_var.set(".env.example が見つかりません")
+            return
+        import shutil
+        shutil.copy2(self._ENV_EXAMPLE, self._ENV_PATH)
+        self._load_env()
+        self.status_var.set("✓ .env.example からコピーしました")
+
+    def _test_lm_studio(self):
+        """LM Studio への接続をテストする。"""
+        url = self._vars.get("LM_STUDIO_URL", tk.StringVar()).get().strip()
+        if not url:
+            url = "http://localhost:1234"
+
+        self.lm_result_var.set("接続中...")
+        self.lm_result_label.config(foreground="gray")
+
+        def _check():
+            try:
+                r = requests.get(f"{url}/v1/models", timeout=3)
+                if r.status_code == 200:
+                    data = r.json()
+                    models = [m.get("id", "?") for m in data.get("data", [])]
+                    model_text = ", ".join(models[:5]) if models else "(モデル未ロード)"
+                    self.after(0, lambda: self._set_lm_result(True, model_text))
+                else:
+                    self.after(0, lambda: self._set_lm_result(
+                        False, f"HTTP {r.status_code}"))
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda: self._set_lm_result(False, msg))
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _set_lm_result(self, ok: bool, detail: str):
+        if ok:
+            self.lm_result_var.set("✓ 接続成功")
+            self.lm_result_label.config(foreground="green")
+            self.lm_models_var.set(detail)
+        else:
+            self.lm_result_var.set("✗ 接続失敗 — LM Studio を起動してください")
+            self.lm_result_label.config(foreground="red")
+            self.lm_models_var.set(f"エラー: {detail}")
+
+
+# ==========================================
+# タブ: 依存関係チェッカー
+# ==========================================
+
+
+class DependencyTab(ttk.Frame):
+    """依存パッケージの状態を表示し、不足分のインストールを支援するタブ。"""
+
+    def __init__(self, parent):
+        super().__init__(parent, padding=12)
+        self._build_ui()
+        self.after(100, self._check_deps)
+
+    def _build_ui(self):
+        top_frm = ttk.Frame(self)
+        top_frm.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(top_frm, text="再チェック", command=self._check_deps, width=12).pack(
+            side=tk.LEFT, padx=(0, 8))
+        self.summary_var = tk.StringVar(value="チェック中...")
+        ttk.Label(top_frm, textvariable=self.summary_var, font=("", 10, "bold")).pack(
+            side=tk.LEFT, padx=8)
+
+        # ツリービュー
+        cols = ("status", "package", "group", "description", "install")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
+        self.tree.heading("status", text="状態")
+        self.tree.heading("package", text="パッケージ")
+        self.tree.heading("group", text="グループ")
+        self.tree.heading("description", text="説明")
+        self.tree.heading("install", text="インストールコマンド")
+        self.tree.column("status", width=60, anchor="center")
+        self.tree.column("package", width=180)
+        self.tree.column("group", width=120)
+        self.tree.column("description", width=200)
+        self.tree.column("install", width=300)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+
+        self.tree.tag_configure("ok", foreground="green")
+        self.tree.tag_configure("missing", foreground="red")
+
+        # インストールボタン
+        btn_frm = ttk.LabelFrame(self, text="一括インストール", padding=8)
+        btn_frm.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Button(btn_frm, text="Browser Use 連携をインストール",
+                   command=lambda: self._install_group("browser_use"), width=30).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Button(btn_frm, text="ナレッジ検索をインストール",
+                   command=lambda: self._install_group("knowledge"), width=25).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Button(btn_frm, text="開発ツールをインストール",
+                   command=lambda: self._install_group("dev"), width=22).pack(
+            side=tk.LEFT, padx=4)
+
+        self.install_status_var = tk.StringVar(value="")
+        ttk.Label(btn_frm, textvariable=self.install_status_var).pack(side=tk.LEFT, padx=12)
+
+    def _check_deps(self):
+        """依存パッケージの状態をチェックしてツリーに表示する。"""
+        from dependency_checker import _GROUP_LABELS, check_all
+
+        self.tree.delete(*self.tree.get_children())
+        results = check_all()
+
+        missing_count = 0
+        for r in results:
+            status = "✓" if r.installed else "✗"
+            tag = "ok" if r.installed else "missing"
+            group_label = _GROUP_LABELS.get(r.dep.group, r.dep.group)
+            install_cmd = f"pip install \"{r.dep.pip_name}\"" if not r.installed else ""
+            ver = f" ({r.version})" if r.version else ""
+            self.tree.insert("", "end", values=(
+                status + ver, r.dep.pip_name, group_label, r.dep.description, install_cmd,
+            ), tags=(tag,))
+            if not r.installed:
+                missing_count += 1
+
+        if missing_count == 0:
+            self.summary_var.set("✓ 全パッケージインストール済み")
+        else:
+            self.summary_var.set(f"✗ {missing_count} 個のパッケージが不足しています")
+
+    def _install_group(self, group: str):
+        """グループ単位でインストールを実行する。"""
+        from dependency_checker import _GROUP_LABELS, install_group
+
+        label = _GROUP_LABELS.get(group, group)
+        self.install_status_var.set(f"{label} をインストール中...")
+        self.update()
+
+        def _run():
+            ok, output = install_group(group)
+            self.after(0, lambda: self._on_install_done(ok, group, output))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_install_done(self, ok: bool, group: str, output: str):
+        from dependency_checker import _GROUP_LABELS
+        label = _GROUP_LABELS.get(group, group)
+        if ok:
+            self.install_status_var.set(f"✓ {label} のインストール完了")
+        else:
+            self.install_status_var.set(f"✗ {label} のインストール失敗")
+            messagebox.showerror(
+                "インストールエラー",
+                f"{label} のインストールに失敗しました:\n\n{output[-500:]}",
+                parent=self.winfo_toplevel(),
+            )
+        # 再チェック
+        self._check_deps()
+
+
+# ==========================================
 # メインウィンドウ
 # ==========================================
 
@@ -1693,6 +2004,8 @@ class TacticalAILauncher(tk.Tk):
         self.tab_history = HistoryTab(self.notebook)
         self.tab_world = WorldSettingTab(self.notebook)
         self.tab_generator = GeneratorTab(self.notebook)
+        self.tab_env = EnvSettingsTab(self.notebook)
+        self.tab_deps = DependencyTab(self.notebook)
 
         self.notebook.add(self.tab_launch, text=" ▶ CCFolia起動 ")
         self.notebook.add(self.tab_maker, text=" 🎲 キャラクターメーカー ")
@@ -1702,6 +2015,8 @@ class TacticalAILauncher(tk.Tk):
         self.notebook.add(self.tab_history, text=" 🕒 履歴 ")
         self.notebook.add(self.tab_world, text=" 🌍 世界観 ")
         self.notebook.add(self.tab_generator, text=" 🛠️ 汎用ジェネレーター ")
+        self.notebook.add(self.tab_env, text=" 🔧 環境設定 ")
+        self.notebook.add(self.tab_deps, text=" 📦 依存関係 ")
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
@@ -1721,6 +2036,10 @@ class TacticalAILauncher(tk.Tk):
                 self.tab_history.refresh()
             elif idx == 6:
                 self.tab_world.load()
+            elif idx == 8:
+                self.tab_env._load_env()
+            elif idx == 9:
+                self.tab_deps._check_deps()
         except Exception:
             pass
 
