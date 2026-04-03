@@ -15,8 +15,16 @@ class BaseVTTAdapter(ABC):
     """
 
     @abstractmethod
-    def connect(self, room_url: str, headless: bool = False) -> None:
-        """VTTルームに接続する。"""
+    def connect(self, room_url: str, headless: bool = False,
+                cdp_url: str | None = None) -> None:
+        """VTTルームに接続する。
+
+        Args:
+            room_url: VTTルームのURL。
+            headless: ヘッドレスモードで起動するか。
+            cdp_url: CDP (Chrome DevTools Protocol) エンドポイントURL。
+                     指定時は既存ブラウザに接続し、GMの認証・権限を引き継ぐ。
+        """
 
     @abstractmethod
     def close(self) -> None:

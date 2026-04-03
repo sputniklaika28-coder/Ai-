@@ -63,8 +63,14 @@ class BrowserUseVTTAdapter(BaseVTTAdapter):
     # 接続 / 切断
     # ──────────────────────────────────────────
 
-    def connect(self, room_url: str, headless: bool = False) -> None:
+    def connect(self, room_url: str, headless: bool = False,
+                cdp_url: str | None = None) -> None:
         """Browser Use でブラウザを起動し、VTT ルームに接続する。"""
+        if cdp_url:
+            logger.warning(
+                "BrowserUseVTTAdapter はCDP接続に対応していません。"
+                "通常モードで接続します。"
+            )
         self._room_url = room_url
         result = self._agent.run_task_sync(
             f"ブラウザで以下のURLにアクセスしてください: {room_url}\n"

@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # stdout をバッファリングなしにする（クラッシュ時にもログが表示されるように）
@@ -295,11 +296,93 @@ COPILOT_TOOLS: list[dict] = [
     },
 ]
 
+HEALTH_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_health",
+            "description": "システム稼働状態を確認する（VTT接続・LM・ビルド状態）",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
+BUILD_MODE_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "enter_build_mode",
+            "description": "ビルドモードに入る（RP停止、部屋構築専念）",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exit_build_mode",
+            "description": "ビルドモードを終了する（RP再開）",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
 # 全ツール結合
 ALL_TOOLS: list[dict] = (
     AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS
     + ASSET_TOOLS + VISION_TOOLS + ROOM_TOOLS + COPILOT_TOOLS
+    + HEALTH_TOOLS + BUILD_MODE_TOOLS
 )
+
+
+# ==========================================
+# ビルドモード・システムヘルス
+# ==========================================
+
+
+@dataclass
+class BuildModeStatus:
+    """ビルドモードの状態管理。ビルド中はRP機能を停止する。"""
+
+    is_active: bool = False
+    current_step: str = ""
+    completed_steps: int = 0
+    total_steps: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    def reset(self) -> None:
+        self.is_active = False
+        self.current_step = ""
+        self.completed_steps = 0
+        self.total_steps = 0
+        self.errors = []
+
+
+@dataclass
+class SystemHealthStatus:
+    """システム全体の稼働状態。"""
+
+    vtt_connected: bool = False
+    vtt_mode: str = "disconnected"  # "disconnected" | "cdp" | "playwright" | "browser_use"
+    lm_reachable: bool = False
+    build_mode: str = "idle"  # "idle" | "building"
+    room_url: str = ""
+
+    def to_display(self) -> str:
+        ok, ng = "○", "×"
+        return (
+            f"VTT: {ok if self.vtt_connected else ng} ({self.vtt_mode}) | "
+            f"LM: {ok if self.lm_reachable else ng} | "
+            f"ビルド: {self.build_mode}"
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "vtt_connected": self.vtt_connected,
+            "vtt_mode": self.vtt_mode,
+            "lm_reachable": self.lm_reachable,
+            "build_mode": self.build_mode,
+            "room_url": self.room_url,
+        }
 
 
 # ==========================================
@@ -395,11 +478,13 @@ class CCFoliaConnector:
         headless: bool = False,
         poll_interval: float | None = None,
         use_browser_use: bool = False,
+        cdp_url: str | None = None,
     ) -> None:
         self.room_url = room_url
         self.poll_interval = poll_interval or self.POLL_INTERVAL
         self.headless = headless
         self._use_browser_use = use_browser_use
+        self.cdp_url = cdp_url
 
         self.lm_client = LMClient()
         # 設定ファイルは常にリポジトリルート基準の絶対パスで解決する
@@ -426,13 +511,23 @@ class CCFoliaConnector:
         # セッション・コパイロット（Phase 4）
         self._copilot: object | None = None
 
+        # ビルドモード・システムヘルス
+        self._build_status = BuildModeStatus()
+        self._health = SystemHealthStatus(room_url=room_url)
+
     # ──────────────────────────────────────────
     # 初期化 / 終了
     # ──────────────────────────────────────────
 
     def _init_adapter(self) -> None:
         """VTTアダプターを初期化してCCFoliaに接続する。"""
-        if self._use_browser_use:
+        if self.cdp_url:
+            # CDP接続: GMが既に開いているブラウザに接続（権限継承）
+            print(f"⏳ 既存ブラウザにCDP接続しています... ({self.cdp_url})")
+            self.adapter = CCFoliaAdapter()
+            self.adapter.connect(self.room_url, cdp_url=self.cdp_url)
+            self._health.vtt_mode = "cdp"
+        elif self._use_browser_use:
             print("⏳ Browser Use でブラウザを起動しています...")
             try:
                 from config import load_config
@@ -455,12 +550,19 @@ class CCFoliaConnector:
                 headless=self.headless,
                 lm_studio_url=cfg.get("lm_studio_url", "http://localhost:1234"),
             )
+            self._health.vtt_mode = "browser_use"
         else:
             print("⏳ Playwright でブラウザを起動しています...")
             self.adapter = CCFoliaAdapter()
-        self.adapter.connect(self.room_url, headless=self.headless)
+            self._health.vtt_mode = "playwright"
+
+        if not self.cdp_url:
+            self.adapter.connect(self.room_url, headless=self.headless)
         self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
-        mode = "Browser Use" if self._use_browser_use else "Playwright"
+        self._health.vtt_connected = True
+        mode = {"cdp": "CDP", "browser_use": "Browser Use", "playwright": "Playwright"}.get(
+            self._health.vtt_mode, "Playwright"
+        )
         print(f"✓ CCFoliaに接続 ({mode}): {self.room_url}")
 
     def _init_copilot(self) -> None:
@@ -499,6 +601,48 @@ class CCFoliaConnector:
             finally:
                 self.adapter = None
                 self.map_ctrl = None
+
+    # ──────────────────────────────────────────
+    # ビルドモード制御
+    # ──────────────────────────────────────────
+
+    def enter_build_mode(self, char_name: str = "GM") -> None:
+        """ビルドモード開始: RP機能を停止し、部屋構築に専念する。"""
+        self._build_status.reset()
+        self._build_status.is_active = True
+        self._health.build_mode = "building"
+        self._post_system_message(
+            char_name, "ビルドモードに入りました。部屋構築中はRP機能を停止します。"
+        )
+        logger.info("ビルドモード開始")
+
+    def exit_build_mode(self, char_name: str = "GM") -> None:
+        """ビルドモード終了: RP機能を再開する。"""
+        summary = self._build_summary()
+        self._build_status.is_active = False
+        self._health.build_mode = "idle"
+        self._post_system_message(char_name, f"ビルドモード終了。{summary}")
+        logger.info("ビルドモード終了: %s", summary)
+
+    def _build_summary(self) -> str:
+        s = self._build_status
+        if s.errors:
+            return f"完了({s.completed_steps}/{s.total_steps}ステップ)、エラー{len(s.errors)}件"
+        return f"全{s.completed_steps}ステップ正常完了"
+
+    def _check_lm_health(self) -> bool:
+        """LMクライアントの到達性を確認する。"""
+        try:
+            res, _ = self.lm_client.generate_response(
+                system_prompt="ping",
+                user_message="返事をしてください",
+                max_tokens=10,
+            )
+            reachable = bool(res)
+        except Exception:
+            reachable = False
+        self._health.lm_reachable = reachable
+        return reachable
 
     # ──────────────────────────────────────────
     # チャット操作（アダプター委譲）
@@ -609,12 +753,34 @@ class CCFoliaConnector:
             except (NotImplementedError, AttributeError):
                 return False, json.dumps({"error": "Vision 機能が利用できません"})
 
-        # ルーム構築ツール
-        if tool_name == "build_room" and self.adapter and self._use_browser_use:
+        # ルーム構築ツール（ビルドモード対応）
+        if tool_name == "build_room" and self.adapter:
+            if self._build_status.is_active:
+                return False, json.dumps({"error": "ビルド中です。完了までお待ちください。"})
+            self.enter_build_mode(char_name)
             try:
                 from room_builder import RoomBuilder, RoomDefinition
-                builder = RoomBuilder(adapter=self.adapter)
+
                 defn = RoomDefinition.from_dict(tool_args.get("room_definition", {}))
+                self._build_status.total_steps = (
+                    1 + bool(defn.background_image)
+                    + len(defn.bgm) + len(defn.characters)
+                )
+
+                def on_progress(result):
+                    self._build_status.completed_steps += 1
+                    self._build_status.current_step = result.step
+                    status = "✓" if result.success else "✗"
+                    self._post_system_message(
+                        char_name,
+                        f"[ビルド {self._build_status.completed_steps}"
+                        f"/{self._build_status.total_steps}] "
+                        f"{status} {result.step}: {result.detail or result.error}",
+                    )
+                    if not result.success:
+                        self._build_status.errors.append(result.error)
+
+                builder = RoomBuilder(adapter=self.adapter, on_progress=on_progress)
                 results = builder.build_room(defn)
                 summary = [
                     {"step": r.step, "success": r.success, "detail": r.detail, "error": r.error}
@@ -622,7 +788,10 @@ class CCFoliaConnector:
                 ]
                 return False, json.dumps({"results": summary}, ensure_ascii=False)
             except Exception as e:
+                self._build_status.errors.append(str(e))
                 return False, json.dumps({"error": str(e)})
+            finally:
+                self.exit_build_mode(char_name)
 
         if tool_name == "set_room_background" and self.adapter and self._use_browser_use:
             try:
@@ -681,6 +850,22 @@ class CCFoliaConnector:
         if tool_name == "set_copilot_mode" and self._copilot:
             self._copilot.mode = tool_args.get("mode", "auto")
             return False, json.dumps({"ok": True, "mode": self._copilot.mode})
+
+        # ヘルス・ビルドモード制御ツール
+        if tool_name == "get_system_health":
+            return False, json.dumps(self._health.to_dict(), ensure_ascii=False)
+
+        if tool_name == "enter_build_mode":
+            if self._build_status.is_active:
+                return False, json.dumps({"error": "既にビルドモード中です"})
+            self.enter_build_mode(char_name)
+            return False, json.dumps({"ok": True, "build_mode": "building"})
+
+        if tool_name == "exit_build_mode":
+            if not self._build_status.is_active:
+                return False, json.dumps({"error": "ビルドモードではありません"})
+            self.exit_build_mode(char_name)
+            return False, json.dumps({"ok": True, "build_mode": "idle"})
 
         # マップ操作ツール
         if self.map_ctrl:
@@ -884,6 +1069,11 @@ class CCFoliaConnector:
                     self.ctx.add_message(speaker, body)
                     print(f"\n📨 新着: [{speaker}] {body[:40]}")
 
+                    # ビルドモード中はRP処理をスキップ
+                    if self._build_status.is_active:
+                        print(f"   [ビルドモード] RP処理スキップ: {body[:30]}")
+                        continue
+
                     # コパイロットのイベントルール処理
                     if self._copilot:
                         try:
@@ -929,6 +1119,12 @@ class CCFoliaConnector:
 
             self._known_messages = self._known_messages[-300:]
             self._drain_stdin_queue()
+
+            # 定期ヘルスチェック（60ポーリング≒約2分ごと）
+            if poll_count % 60 == 0:
+                self._check_lm_health()
+                print(f"   [ヘルス] {self._health.to_display()}")
+
             time.sleep(self.poll_interval)
 
     def _stdin_monitor_loop(self) -> None:
@@ -988,6 +1184,8 @@ class CCFoliaConnector:
         self._init_adapter()
         self._init_knowledge()
         self._init_copilot()
+        self._check_lm_health()
+        print(f"   [ヘルス] {self._health.to_display()}")
         self._running = True
 
         # stdin監視だけ別スレッド（Playwright を触らない）
@@ -1008,9 +1206,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--room", required=True)
     parser.add_argument("--default", default="meta_gm")
+    parser.add_argument(
+        "--cdp", default=None,
+        help="CDP URL で既存ブラウザに接続 (例: http://localhost:9222)",
+    )
     args = parser.parse_args()
     try:
-        CCFoliaConnector(args.room, args.default).start()
+        CCFoliaConnector(args.room, args.default, cdp_url=args.cdp).start()
     except Exception:
         print("\n" + "=" * 50)
         print("❌ 致命的エラーが発生しました:")

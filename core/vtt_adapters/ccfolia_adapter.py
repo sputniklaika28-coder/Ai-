@@ -73,8 +73,68 @@ class CCFoliaAdapter(BaseVTTAdapter):
     # 接続 / 切断
     # ──────────────────────────────────────────
 
-    def connect(self, room_url: str, headless: bool = False) -> None:
-        """Chromium を起動して CCFolia ルームに接続する。"""
+    def connect_cdp(self, cdp_url: str = "http://localhost:9222") -> None:
+        """既にGMがログイン済みのブラウザにCDP経由で接続する。
+
+        GMの認証情報とルーム権限をそのまま利用できるため、
+        権限不足の問題を回避できる。
+
+        GMが Chrome を以下のように起動している前提:
+          chrome.exe --remote-debugging-port=9222
+
+        Args:
+            cdp_url: CDPエンドポイントURL。
+        """
+        if not _HAS_PLAYWRIGHT:
+            raise ModuleNotFoundError(
+                "playwright パッケージが見つかりません。\n"
+                "  pip install playwright && python -m playwright install chromium\n"
+                "を実行してください。"
+            )
+
+        self._pw_context_manager = sync_playwright().start()
+        pw = self._pw_context_manager
+        self._browser = pw.chromium.connect_over_cdp(cdp_url)
+
+        # 既存のコンテキストとページを取得
+        contexts = self._browser.contexts
+        if not contexts:
+            raise RuntimeError(
+                "ブラウザにコンテキストがありません。"
+                "Chromeが --remote-debugging-port 付きで起動されているか確認してください。"
+            )
+        self._context = contexts[0]
+
+        # CCFoliaが開いているタブを探す
+        ccfolia_page = None
+        for page in self._context.pages:
+            if "ccfolia" in page.url.lower():
+                ccfolia_page = page
+                break
+
+        if ccfolia_page is None:
+            available = [p.url for p in self._context.pages]
+            raise RuntimeError(
+                "CCFoliaが開かれているタブが見つかりません。\n"
+                f"開いているタブ: {available}\n"
+                "GMがCCFoliaのルームを開いた状態で再試行してください。"
+            )
+
+        self._page = ccfolia_page
+        logger.info("CDP経由でCCFoliaに接続: %s", self._page.url)
+        print(f"   ✓ CDP経由でCCFoliaに接続: {self._page.url}")
+
+    def connect(self, room_url: str, headless: bool = False,
+                cdp_url: str | None = None) -> None:
+        """CCFolia ルームに接続する。
+
+        cdp_url が指定された場合は既存ブラウザにCDP接続し、
+        GMの認証・権限を引き継ぐ。指定なしの場合は新規Chromiumを起動する。
+        """
+        if cdp_url:
+            self.connect_cdp(cdp_url)
+            return
+
         if not _HAS_PLAYWRIGHT:
             raise ModuleNotFoundError(
                 "playwright パッケージが見つかりません。\n"

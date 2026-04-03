@@ -166,6 +166,28 @@ class LauncherTab(ttk.Frame):
             row=3, column=1, sticky="w", padx=8
         )
 
+        # CDP接続オプション（既存ブラウザに接続してGM権限を引き継ぐ）
+        cdp_frame = ttk.Frame(top)
+        cdp_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=4)
+        self.var_use_cdp = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            cdp_frame, text="既存ブラウザに接続 (CDP)",
+            variable=self.var_use_cdp,
+            command=self._toggle_cdp,
+        ).pack(side=tk.LEFT)
+        self.var_cdp_url = tk.StringVar(value="http://localhost:9222")
+        self.entry_cdp_url = ttk.Entry(
+            cdp_frame, textvariable=self.var_cdp_url, width=30, state="disabled"
+        )
+        self.entry_cdp_url.pack(side=tk.LEFT, padx=(8, 0))
+        self.lbl_cdp_hint = ttk.Label(
+            cdp_frame,
+            text="Chrome を --remote-debugging-port=9222 で起動",
+            foreground="gray",
+            font=("", 8),
+        )
+        self.lbl_cdp_hint.pack(side=tk.LEFT, padx=(8, 0))
+
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, pady=(0, 8))
 
@@ -229,14 +251,23 @@ class LauncherTab(ttk.Frame):
             self.lm_status_var.set("✗ 未接続 — LM-Studio を起動してください")
             self.lm_status_label.config(foreground="red")
 
+    def _toggle_cdp(self):
+        """CDPチェックボックスの切り替え時にURL入力欄の有効/無効を切り替える。"""
+        if self.var_use_cdp.get():
+            self.entry_cdp_url.config(state="normal")
+        else:
+            self.entry_cdp_url.config(state="disabled")
+
     def _on_start(self):
         url = self.var_url.get().strip()
-        if not url:
+        use_cdp = self.var_use_cdp.get()
+
+        if not url and not use_cdp:
             messagebox.showwarning(
                 "入力エラー", "Room URL を入力してください", parent=self.winfo_toplevel()
             )
             return
-        if not url.startswith("http"):
+        if url and not url.startswith("http"):
             messagebox.showwarning(
                 "入力エラー",
                 "URL は http:// または https:// で始める必要があります",
@@ -244,10 +275,18 @@ class LauncherTab(ttk.Frame):
             )
             return
 
+        # CDP接続時はroom_urlが空でもCCFoliaタブから自動取得するため許容
+        if use_cdp and not url:
+            url = "https://ccfolia.com"  # プレースホルダー（CDP接続時は使わない）
+
         default_char = self.var_default_char.get().strip() or "meta_gm"
         connector_path = CORE_DIR / "ccfolia_connector.py"
 
         cmd = [PYTHON, str(connector_path), "--room", url, "--default", default_char]
+        if use_cdp:
+            cdp_url = self.var_cdp_url.get().strip()
+            if cdp_url:
+                cmd += ["--cdp", cdp_url]
 
         self._log(f"起動コマンド: {' '.join(cmd)}\n", "info")
 

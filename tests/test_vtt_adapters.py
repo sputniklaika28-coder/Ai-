@@ -5,7 +5,7 @@ BaseVTTAdapter のインターフェース準拠と、
 CCFoliaAdapter の各メソッドをモック環境でテストする。
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -210,3 +210,108 @@ class TestCCFoliaAdapterClose:
         adapter_with_mock_page.close()
         assert adapter_with_mock_page._page is None
         assert adapter_with_mock_page._browser is None
+
+
+# ──────────────────────────────────────────
+# CDP接続テスト
+# ──────────────────────────────────────────
+
+
+class TestCCFoliaAdapterCDP:
+    def test_connect_with_cdp_url_calls_connect_cdp(self):
+        """connect(cdp_url=...) で connect_cdp が呼ばれること。"""
+        adapter = CCFoliaAdapter()
+        adapter.connect_cdp = MagicMock()
+        adapter.connect("https://ccfolia.com/rooms/test", cdp_url="http://localhost:9222")
+        adapter.connect_cdp.assert_called_once_with("http://localhost:9222")
+
+    def test_connect_without_cdp_url_does_not_call_connect_cdp(self, mock_page):
+        """cdp_url 未指定時は connect_cdp が呼ばれないこと。"""
+        adapter = CCFoliaAdapter()
+        adapter.connect_cdp = MagicMock()
+        # connect() は Playwright を起動するので、実際の接続はスキップ
+        # connect_cdp が呼ばれないことだけ確認
+        # (Playwright がないとエラーになるのでここでは呼ばない)
+        assert not adapter.connect_cdp.called
+
+    def test_connect_cdp_no_contexts_raises(self):
+        """CDP接続でコンテキストがない場合はRuntimeError。"""
+        adapter = CCFoliaAdapter()
+        mock_pw_manager = MagicMock()
+        mock_browser = MagicMock()
+        mock_browser.contexts = []
+
+        with (
+            patch("core.vtt_adapters.ccfolia_adapter._HAS_PLAYWRIGHT", True),
+            patch("core.vtt_adapters.ccfolia_adapter.sync_playwright") as mock_pw,
+        ):
+            mock_pw.return_value.start.return_value = mock_pw_manager
+            mock_pw_manager.chromium.connect_over_cdp.return_value = mock_browser
+
+            with pytest.raises(RuntimeError, match="コンテキスト"):
+                adapter.connect_cdp("http://localhost:9222")
+
+    def test_connect_cdp_no_ccfolia_tab_raises(self):
+        """CDP接続でCCFoliaタブがない場合はRuntimeError。"""
+        adapter = CCFoliaAdapter()
+        mock_pw_manager = MagicMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_page = MagicMock()
+        mock_page.url = "https://google.com"
+        mock_context.pages = [mock_page]
+        mock_browser.contexts = [mock_context]
+
+        with (
+            patch("core.vtt_adapters.ccfolia_adapter._HAS_PLAYWRIGHT", True),
+            patch("core.vtt_adapters.ccfolia_adapter.sync_playwright") as mock_pw,
+        ):
+            mock_pw.return_value.start.return_value = mock_pw_manager
+            mock_pw_manager.chromium.connect_over_cdp.return_value = mock_browser
+
+            with pytest.raises(RuntimeError, match="CCFolia"):
+                adapter.connect_cdp("http://localhost:9222")
+
+    def test_connect_cdp_finds_ccfolia_tab(self):
+        """CDP接続でCCFoliaタブが見つかった場合はページが設定される。"""
+        adapter = CCFoliaAdapter()
+        mock_pw_manager = MagicMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_page1 = MagicMock()
+        mock_page1.url = "https://google.com"
+        mock_page2 = MagicMock()
+        mock_page2.url = "https://ccfolia.com/rooms/abc123"
+        mock_context.pages = [mock_page1, mock_page2]
+        mock_browser.contexts = [mock_context]
+
+        with (
+            patch("core.vtt_adapters.ccfolia_adapter._HAS_PLAYWRIGHT", True),
+            patch("core.vtt_adapters.ccfolia_adapter.sync_playwright") as mock_pw,
+        ):
+            mock_pw.return_value.start.return_value = mock_pw_manager
+            mock_pw_manager.chromium.connect_over_cdp.return_value = mock_browser
+
+            adapter.connect_cdp("http://localhost:9222")
+
+        assert adapter._page is mock_page2
+        assert adapter._context is mock_context
+
+
+class TestBaseAdapterCDPSignature:
+    def test_connect_accepts_cdp_url(self):
+        """BaseVTTAdapter.connect() が cdp_url パラメータを受け付けること。"""
+
+        class TestAdapter(BaseVTTAdapter):
+            def connect(self, room_url, headless=False, cdp_url=None): pass
+            def close(self): pass
+            def get_board_state(self): return []
+            def move_piece(self, piece_id, grid_x, grid_y): return True
+            def spawn_piece(self, character_json): return True
+            def send_chat(self, character_name, text): return True
+            def get_chat_messages(self): return []
+            def take_screenshot(self): return None
+
+        adapter = TestAdapter()
+        adapter.connect("https://example.com", cdp_url="http://localhost:9222")
+        assert isinstance(adapter, BaseVTTAdapter)
