@@ -2059,27 +2059,67 @@ class TacticalAILauncher(tk.Tk):
         self.notebook.add(self.tab_env, text=" 🔧 環境設定 ")
         self.notebook.add(self.tab_deps, text=" 📦 依存関係 ")
 
+        # アドオンGUIタブを動的に追加
+        self._load_addon_tabs()
+
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
+
+    def _load_addon_tabs(self):
+        """addons/ フォルダをスキャンしてGUIタブを持つアドオンを探し動的追加する。"""
+        try:
+            from pathlib import Path
+            addons_dir = Path(__file__).resolve().parent.parent / "addons"
+            if not addons_dir.is_dir():
+                return
+            import sys
+            root_dir = str(addons_dir.parent)
+            if root_dir not in sys.path:
+                sys.path.insert(0, root_dir)
+            from core.addons import AddonManager
+            # マニフェスト探索のみ（重いロードはしない）
+            mgr = AddonManager(addons_dir=addons_dir)
+            for manifest in mgr.discover():
+                if manifest.gui_tab and manifest.gui_tab_label:
+                    try:
+                        import importlib.util
+                        addon_dir = addons_dir / manifest.id
+                        entry_path = addon_dir / manifest.entry_point
+                        spec = importlib.util.spec_from_file_location(
+                            f"addons.{manifest.id}", entry_path
+                        )
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            tab_cls = getattr(mod, manifest.gui_tab, None)
+                            if tab_cls:
+                                tab = tab_cls(self.notebook)
+                                self.notebook.add(tab, text=f" {manifest.gui_tab_label} ")
+                    except Exception as e:
+                        print(f"アドオンタブ読み込みエラー ({manifest.id}): {e}")
+        except Exception as e:
+            print(f"アドオンタブスキャンエラー: {e}")
 
     def _on_tab_change(self, event):
         try:
             idx = event.widget.index(event.widget.select())
-            if idx == 0:
+            # 固定タブはテキストで照合（アドオンタブ追加後もインデックスがずれない）
+            tab_text = event.widget.tab(idx, "text").strip()
+            if idx == 0 or tab_text.startswith("▶"):
                 self.tab_launch._refresh_sessions()
                 self.tab_launch._update_lm_status()
-            elif idx == 2:
+            elif tab_text.startswith("👥"):
                 self.tab_char.refresh()
-            elif idx == 3:
+            elif tab_text.startswith("📝"):
                 self.tab_prompt.refresh()
-            elif idx == 4:
+            elif tab_text.startswith("⚙"):
                 self.tab_session._load_session()
-            elif idx == 5:
+            elif tab_text.startswith("🕒"):
                 self.tab_history.refresh()
-            elif idx == 6:
+            elif tab_text.startswith("🌍"):
                 self.tab_world.load()
-            elif idx == 8:
+            elif tab_text.startswith("🔧"):
                 self.tab_env._load_env()
-            elif idx == 9:
+            elif tab_text.startswith("📦"):
                 self.tab_deps._check_deps()
         except Exception:
             pass

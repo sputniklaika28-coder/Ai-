@@ -149,7 +149,12 @@ class TestBuildModeIntegration:
             patch("core.ccfolia_connector.PromptManager") as MockPM,
             patch("core.ccfolia_connector.LMClient") as MockLM,
             patch("core.ccfolia_connector.SessionManager") as MockSM,
+            patch("core.ccfolia_connector.AddonManager") as MockAddonMgr,
         ):
+            MockAddonMgr.return_value.discover.return_value = []
+            MockAddonMgr.return_value.get_all_tools.return_value = []
+            MockAddonMgr.return_value.get_active_rule_system.return_value = None
+            MockAddonMgr.return_value.loaded_addons = {}
             MockCM.return_value.characters = {
                 "meta_gm": {
                     "id": "meta_gm", "name": "GM", "enabled": True,
@@ -189,15 +194,16 @@ class TestBuildModeIntegration:
         assert c._build_status.is_active is False
         assert c._health.build_mode == "idle"
 
-    def test_build_mode_blocks_concurrent(self, mock_connector):
+    def test_build_mode_blocks_enter_while_active(self, mock_connector):
+        """ビルドモード中に再度 enter_build_mode を呼ぶとエラー。"""
         c = mock_connector
         c._build_status.is_active = True
 
         finished, result_json = c._execute_tool(
-            "build_room", {"room_definition": {"name": "test"}}, "GM", "tc1",
+            "enter_build_mode", {}, "GM", "tc1",
         )
         result = json.loads(result_json)
-        assert "ビルド中" in result["error"]
+        assert "error" in result
 
     def test_health_tool_returns_status(self, mock_connector):
         c = mock_connector

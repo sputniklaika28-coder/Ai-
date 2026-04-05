@@ -37,8 +37,13 @@ from character_manager import CharacterManager
 from knowledge_manager import KnowledgeManager
 from lm_client import LMClient
 from main import PromptManager
+from memory_manager import MemoryManager
 from session_manager import SessionManager
 from vtt_adapters.ccfolia_adapter import CCFoliaAdapter
+
+# アドオンフレームワーク
+sys.path.insert(0, str(_ROOT_DIR))
+from core.addons import AddonContext, AddonManager, ToolExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -436,9 +441,24 @@ class SessionContext:
         "free": 0, "briefing": 1, "mission": 2, "combat": 3, "assessment": 4
     }
 
-    def __init__(self) -> None:
+    def __init__(self, lm_client=None) -> None:
         self.phase: str = "free"
-        self.history: list[dict] = []
+        # MemoryManager で履歴を管理（ローリング要約対応）
+        self._memory = MemoryManager(lm_client=lm_client)
+
+    def attach_lm_client(self, lm_client) -> None:
+        """起動後に LMClient を注入する（遅延初期化用）。"""
+        self._memory.lm_client = lm_client
+
+    def set_phase_keywords(self, keywords: dict[str, list[str]]) -> None:
+        """ルールアドオンからフェイズキーワードを動的に設定する。"""
+        if keywords:
+            self._PHASE_KEYWORDS = keywords
+
+    @property
+    def history(self) -> list[dict]:
+        """後方互換: 直近メッセージのリストを返す。"""
+        return self._memory.get_recent_messages()
 
     def update_phase(self, body: str, is_ai: bool = False) -> None:
         if is_ai:
@@ -452,13 +472,12 @@ class SessionContext:
             self.phase = new_phase
 
     def add_message(self, speaker: str, body: str, is_ai: bool = False) -> None:
-        self.history.append({"speaker": speaker, "body": body})
-        self.history = self.history[-100:]
+        self._memory.add_message(speaker, body)
         self.update_phase(body, is_ai)
 
     def get_context_summary(self) -> str:
-        lines = [f"[{m['speaker']}]: {m['body']}" for m in self.history[-25:]]
-        return f"【フェイズ: {self.phase.upper()}】\n【直近の会話】\n" + "\n".join(lines)
+        ctx = self._memory.get_context_window()
+        return f"【フェイズ: {self.phase.upper()}】\n{ctx}" if ctx else f"【フェイズ: {self.phase.upper()}】"
 
 
 # ==========================================
@@ -491,7 +510,8 @@ class CCFoliaConnector:
         self.cm = CharacterManager(str(_ROOT_DIR / "configs" / "characters.json"))
         self.pm = PromptManager(str(_ROOT_DIR / "configs" / "prompts.json"))
         self.detector = CharacterDetector(self.cm, default_id=default_character_id)
-        self.ctx = SessionContext()
+        # SessionContext に LMClient を注入してローリング要約を有効化
+        self.ctx = SessionContext(lm_client=self.lm_client)
         self.sm = SessionManager(_ROOT_DIR)
         self.world_setting = self._load_world_setting()
 
@@ -514,6 +534,12 @@ class CCFoliaConnector:
         # ビルドモード・システムヘルス
         self._build_status = BuildModeStatus()
         self._health = SystemHealthStatus(room_url=room_url)
+
+        # アドオンマネージャー
+        self.addon_manager = AddonManager(
+            addons_dir=_ROOT_DIR / "addons",
+            core_dir=_CORE_DIR,
+        )
 
     # ──────────────────────────────────────────
     # 初期化 / 終了
@@ -590,6 +616,38 @@ class CCFoliaConnector:
         except Exception as e:
             logger.warning("KnowledgeManager 初期化エラー: %s", e)
             self.knowledge_manager = None
+
+    def _init_addons(self) -> None:
+        """アドオンを探索・ロードし、ルールシステムのフェイズキーワードを適用する。"""
+        try:
+            ctx = AddonContext(
+                adapter=self.adapter,
+                lm_client=self.lm_client,
+                knowledge_manager=self.knowledge_manager,
+                session_manager=self.sm,
+                character_manager=self.cm,
+                root_dir=_ROOT_DIR,
+            )
+            manifests = self.addon_manager.discover()
+            if manifests:
+                self.addon_manager.load_all(ctx)
+                rule = self.addon_manager.get_active_rule_system()
+                if rule:
+                    phase_kw = rule.get_phase_keywords()
+                    if phase_kw:
+                        self.ctx.set_phase_keywords(phase_kw)
+                    logger.info("ルールシステム適用: %s", rule.manifest.name)
+                print(f"✓ {len(self.addon_manager.loaded_addons)} 個のアドオンをロードしました")
+            else:
+                print("ℹ アドオンが見つかりませんでした（デフォルト動作で起動）")
+        except Exception as e:
+            logger.warning("アドオン初期化エラー: %s", e)
+
+    def _get_all_tools(self) -> list[dict]:
+        """コアツール + アドオンツールを集約して返す。"""
+        core_tools = AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS + HEALTH_TOOLS
+        addon_tools = self.addon_manager.get_all_tools()
+        return core_tools + addon_tools
 
     def _close_adapter(self) -> None:
         """VTTアダプターを閉じる。"""
@@ -714,144 +772,7 @@ class CCFoliaConnector:
                 return False, json.dumps(results, ensure_ascii=False)
             return False, json.dumps({"error": "KnowledgeManager が未初期化です"})
 
-        # アセットアップロードツール
-        if tool_name == "upload_asset" and self.adapter and self._use_browser_use:
-            try:
-                url = self.adapter.upload_asset(
-                    tool_args.get("file_path", ""),
-                    tool_args.get("asset_type", "background"),
-                )
-                return False, json.dumps({"url": url or "", "ok": url is not None})
-            except NotImplementedError:
-                return False, json.dumps({"error": "このアダプターは upload_asset に対応していません"})
-
-        # VLM Vision ツール
-        if tool_name == "analyze_board_vision" and self.adapter and self._use_browser_use:
-            try:
-                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
-                pieces = vision.analyze_board(tool_args.get("query", ""))
-                return False, json.dumps(pieces, ensure_ascii=False, default=str)
-            except (NotImplementedError, AttributeError):
-                return False, json.dumps({"error": "Vision 機能が利用できません"})
-
-        if tool_name == "place_piece_at_location" and self.adapter and self._use_browser_use:
-            try:
-                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
-                ok = vision.place_piece_at_visual_location(
-                    tool_args.get("description", ""),
-                    tool_args.get("character_json", {}),
-                )
-                return False, json.dumps({"ok": ok})
-            except (NotImplementedError, AttributeError):
-                return False, json.dumps({"error": "Vision 機能が利用できません"})
-
-        if tool_name == "describe_board_scene" and self.adapter and self._use_browser_use:
-            try:
-                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
-                desc = vision.describe_scene()
-                return False, json.dumps({"description": desc})
-            except (NotImplementedError, AttributeError):
-                return False, json.dumps({"error": "Vision 機能が利用できません"})
-
-        # ルーム構築ツール（ビルドモード対応）
-        if tool_name == "build_room" and self.adapter:
-            if self._build_status.is_active:
-                return False, json.dumps({"error": "ビルド中です。完了までお待ちください。"})
-            self.enter_build_mode(char_name)
-            try:
-                from room_builder import RoomBuilder, RoomDefinition
-
-                defn = RoomDefinition.from_dict(tool_args.get("room_definition", {}))
-                self._build_status.total_steps = (
-                    1 + bool(defn.background_image)
-                    + len(defn.bgm) + len(defn.characters)
-                )
-
-                def on_progress(result):
-                    self._build_status.completed_steps += 1
-                    self._build_status.current_step = result.step
-                    status = "✓" if result.success else "✗"
-                    self._post_system_message(
-                        char_name,
-                        f"[ビルド {self._build_status.completed_steps}"
-                        f"/{self._build_status.total_steps}] "
-                        f"{status} {result.step}: {result.detail or result.error}",
-                    )
-                    if not result.success:
-                        self._build_status.errors.append(result.error)
-
-                builder = RoomBuilder(adapter=self.adapter, on_progress=on_progress)
-                results = builder.build_room(defn)
-                summary = [
-                    {"step": r.step, "success": r.success, "detail": r.detail, "error": r.error}
-                    for r in results
-                ]
-                return False, json.dumps({"results": summary}, ensure_ascii=False)
-            except Exception as e:
-                self._build_status.errors.append(str(e))
-                return False, json.dumps({"error": str(e)})
-            finally:
-                self.exit_build_mode(char_name)
-
-        if tool_name == "set_room_background" and self.adapter and self._use_browser_use:
-            try:
-                from room_builder import RoomBuilder
-                builder = RoomBuilder(adapter=self.adapter)
-                r = builder.set_background(tool_args.get("image_path", ""))
-                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        if tool_name == "add_room_bgm" and self.adapter and self._use_browser_use:
-            try:
-                from room_builder import RoomBuilder
-                builder = RoomBuilder(adapter=self.adapter)
-                r = builder.add_bgm(
-                    tool_args.get("file_path", ""), tool_args.get("name", ""),
-                )
-                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        if tool_name == "place_room_character" and self.adapter and self._use_browser_use:
-            try:
-                from room_builder import CharacterPlacement, RoomBuilder
-                builder = RoomBuilder(adapter=self.adapter)
-                char = CharacterPlacement(
-                    name=tool_args.get("name", ""),
-                    position=tool_args.get("position", ""),
-                    grid_x=tool_args.get("grid_x"),
-                    grid_y=tool_args.get("grid_y"),
-                    ccfolia_data=tool_args.get("ccfolia_data", {}),
-                )
-                r = builder.place_character(char)
-                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        # コパイロットツール
-        if tool_name == "transition_scene" and self._copilot:
-            results = self._copilot.transition_to(tool_args.get("scene_name", ""))
-            return False, json.dumps({"results": results}, ensure_ascii=False)
-
-        if tool_name == "list_scenes" and self._copilot:
-            scenes = self._copilot.list_scenes()
-            return False, json.dumps({"scenes": scenes}, ensure_ascii=False)
-
-        if tool_name == "register_scene" and self._copilot:
-            try:
-                from session_copilot import SceneDefinition
-                defn = SceneDefinition.from_dict(tool_args.get("scene_definition", {}))
-                self._copilot.register_scene(defn)
-                return False, json.dumps({"ok": True, "scene": defn.name})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        if tool_name == "set_copilot_mode" and self._copilot:
-            self._copilot.mode = tool_args.get("mode", "auto")
-            return False, json.dumps({"ok": True, "mode": self._copilot.mode})
-
-        # ヘルス・ビルドモード制御ツール
+        # ヘルス・ビルドモード制御ツール（コア状態に直接触れるためコアに残す）
         if tool_name == "get_system_health":
             return False, json.dumps(self._health.to_dict(), ensure_ascii=False)
 
@@ -867,12 +788,20 @@ class CCFoliaConnector:
             self.exit_build_mode(char_name)
             return False, json.dumps({"ok": True, "build_mode": "idle"})
 
-        # マップ操作ツール
+        # マップ操作ツール（コアに残す）
         if self.map_ctrl:
             result = execute_map_tool(self.map_ctrl, tool_name, tool_args)
-            return False, json.dumps(result, ensure_ascii=False, default=str)
+            if "error" not in result or "未知のツール" not in result.get("error", ""):
+                return False, json.dumps(result, ensure_ascii=False, default=str)
 
-        return False, json.dumps({"error": f"未知のツール: {tool_name}"})
+        # アドオンに委譲
+        addon_ctx = ToolExecutionContext(
+            char_name=char_name,
+            tool_call_id=tool_call_id,
+            adapter=self.adapter,
+            connector=self,
+        )
+        return self.addon_manager.execute_tool(tool_name, tool_args, addon_ctx)
 
     # ──────────────────────────────────────────
     # エージェントループ
@@ -887,8 +816,20 @@ class CCFoliaConnector:
         char_name = target_char["name"]
         prompt_tmpl = self.pm.get_template(target_char.get("prompt_id"))
 
-        sys_prompt = (
-            f"{self.world_setting}\n\n{prompt_tmpl['system'] if prompt_tmpl else ''}\n\n"
+        # ルールアドオンから世界観・プロンプトを動的取得
+        rule_addon = self.addon_manager.get_active_rule_system()
+        if rule_addon:
+            world = rule_addon.get_world_setting() or self.world_setting
+            rule_override = rule_addon.get_system_prompt_override() or ""
+        else:
+            world = self.world_setting
+            rule_override = ""
+
+        base_system = prompt_tmpl["system"] if prompt_tmpl else ""
+        parts = [world, base_system]
+        if rule_override:
+            parts.append(rule_override)
+        parts.append(
             "【GMアクション指示】\n"
             "あなたはGMです。画像とチャットを見て次に行うべきことを判断してください。\n"
             "1. まず `[思考]` と `[/思考]` のタグの中で、状況を分析してください。\n"
@@ -900,6 +841,7 @@ class CCFoliaConnector:
             "ダメージや回復など、ステータスに変動があった際は、発言の末尾に必ず"
             "「(現在HP: 敵A 5/10, 敵B 10/10)」のように明記してステータス管理を行ってください。"
         )
+        sys_prompt = "\n\n".join(p for p in parts if p)
 
         messages: list[dict] = [
             {"role": "system", "content": sys_prompt},
@@ -921,7 +863,7 @@ class CCFoliaConnector:
 
                 content, tool_calls = self.lm_client.generate_with_tools(
                     messages,
-                    ALL_TOOLS,
+                    self._get_all_tools(),
                     temperature=0.7,
                     max_tokens=1500,
                     image_base64=screenshot_b64,
@@ -1184,6 +1126,7 @@ class CCFoliaConnector:
         self._init_adapter()
         self._init_knowledge()
         self._init_copilot()
+        self._init_addons()
         self._check_lm_health()
         print(f"   [ヘルス] {self._health.to_display()}")
         self._running = True

@@ -1,0 +1,12 @@
+{
+  "id": "asset_uploader",
+  "name": "アセットアップローダー",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "画像・BGMなどのローカルファイルをCCFoliaにアップロード",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "AssetUploaderAddon",
+  "tools": ["upload_asset"]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "session_copilot",
+  "name": "セッションコパイロット",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "シーン遷移・イベント駆動型自動対応を提供するセッション管理ツール",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "SessionCopilotAddon",
+  "tools": [
+    "transition_scene",
+    "list_scenes",
+    "register_scene",
+    "set_copilot_mode"
+  ]
+}
