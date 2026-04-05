@@ -1,0 +1,1 @@
+../../configs/world_setting_compressed.txt

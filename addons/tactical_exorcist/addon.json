@@ -1,0 +1,13 @@
+{
+  "id": "tactical_exorcist",
+  "name": "タクティカル祓魔師",
+  "version": "1.0.0",
+  "type": "rule_system",
+  "description": "タクティカル祓魔師TRPGのルールシステム — フェイズ管理・プロンプト・世界観を提供",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "TacticalExorcistAddon",
+  "prompts_override": "prompts.json",
+  "world_setting": "world_setting_compressed.txt"
+}
