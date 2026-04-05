@@ -12,8 +12,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# core/ を import できるようにパスを追加
+# core/ と addons/ を import できるようにパスを追加
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "addons"))
 
 
 # ──────────────────────────────────────────

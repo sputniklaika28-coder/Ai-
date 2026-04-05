@@ -1,0 +1,18 @@
+{
+  "id": "image_generator",
+  "name": "画像生成 (ComfyUI)",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "ComfyUI連携による画像生成 — シーン背景・キャラクターイラスト・マップ自動生成",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "ImageGeneratorAddon",
+  "tools": [
+    "generate_image",
+    "generate_scene_background",
+    "list_image_styles"
+  ],
+  "gui_tab": "gui_tab.py",
+  "gui_tab_label": "画像生成"
+}
