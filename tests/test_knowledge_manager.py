@@ -248,3 +248,109 @@ class TestGetStats:
         km.add_documents(["テスト1", "テスト2"])
         stats = km.get_stats()
         assert stats["document_count"] == 2
+
+
+# ──────────────────────────────────────────
+# Phase 3: BM25 ハイブリッド検索テスト
+# ──────────────────────────────────────────
+
+
+class TestBM25HybridSearch:
+    """BM25 ハイブリッド検索（rank_bm25 がある場合）のテスト。"""
+
+    def test_stats_include_bm25_info(self, km):
+        stats = km.get_stats()
+        assert "bm25_available" in stats
+        assert "bm25_corpus_size" in stats
+        assert "hybrid_search" in stats
+
+    def test_bm25_corpus_grows_with_add(self, km):
+        if not km._bm25_available:
+            pytest.skip("rank_bm25 が未インストール")
+        km.add_documents(["文書A 固有名詞テスト", "文書B 別のテスト"])
+        assert len(km._bm25_corpus) == 2
+
+    def test_hybrid_search_returns_results(self, km):
+        """ハイブリッド検索が結果を返すことを確認。"""
+        if not km._bm25_available:
+            pytest.skip("rank_bm25 が未インストール")
+        km.add_documents([
+            "ファイアボールは炎属性の呪文。範囲4マス。ダメージ3d6。",
+            "アイスランスは氷属性。単体攻撃。ダメージ2d8。",
+            "キャラクターのHPは最大20。",
+        ])
+        results = km.search_knowledge_base("ファイアボール")
+        assert len(results) > 0
+        # ファイアボールを含む結果が返ってくる
+        texts = [r["text"] for r in results]
+        assert any("ファイアボール" in t for t in texts)
+
+    def test_hybrid_search_api_signature_unchanged(self, km):
+        """ハイブリッド化後も既存 API が変わらないことを確認。"""
+        km.add_documents(["テストドキュメント"])
+        results = km.search_knowledge_base("テスト", n_results=3)
+        assert isinstance(results, list)
+        if results:
+            assert "text" in results[0]
+            assert "metadata" in results[0]
+            assert "distance" in results[0]
+
+    def test_bm25_finds_keyword_not_in_vector_top(self, km):
+        """キーワード一致がベクトル検索を補完する確認。"""
+        if not km._bm25_available:
+            pytest.skip("rank_bm25 が未インストール")
+        km.add_documents([
+            "セーブデータのバックアップ方法について",
+            "TRPGのキャラクターを作成する手順と注意点",
+            "祓魔師コード247: 特殊暗号認証プロトコル",  # 固有名詞
+        ])
+        results = km.search_knowledge_base("祓魔師コード247", n_results=3)
+        texts = [r["text"] for r in results]
+        # 固有名詞を含む文書が上位に来ていることを確認
+        assert any("247" in t for t in texts[:2])
+
+
+class TestContextualChunking:
+    """Contextual Chunking (ingest_world_setting の改善) のテスト。"""
+
+    def test_ingested_chunks_contain_section_header(self, km, tmp_path):
+        """登録されたチャンクにセクションヘッダが付与されていることを確認。"""
+        data = {
+            "魔法システム": "ファイアボールは炎系攻撃魔法。MP消費5。",
+            "戦闘ルール": "行動順はイニシアチブ値で決まる。",
+        }
+        p = tmp_path / "ws.json"
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        km.ingest_world_setting(p)
+
+        # コレクションを直接確認
+        if km.collection:
+            all_docs = km.collection.get()
+            docs_text = all_docs.get("documents", [])
+            # 少なくとも1つのチャンクにセクションヘッダが付いている
+            assert any("【" in d for d in docs_text)
+            assert any("魔法システム" in d or "戦闘ルール" in d for d in docs_text)
+
+    def test_ingest_rulebook_text_file(self, km, tmp_path):
+        """テキストファイルのルールブック取り込みテスト。"""
+        rulebook = tmp_path / "rules.txt"
+        rulebook.write_text(
+            "第1章: 基本ルール\n祓魔師は毎ターン1回行動できる。\n\n第2章: 戦闘\n戦闘は10フェイズ制。",
+            encoding="utf-8",
+        )
+        count = km.ingest_rulebook(rulebook, source_name="test_rulebook")
+        assert count > 0
+
+    def test_tokenize_ja_extracts_cjk_ngrams(self):
+        """日本語トークナイザーが CJK 2-gram を正しく生成する。"""
+        from core.knowledge_manager import _tokenize_ja
+        tokens = _tokenize_ja("ファイアボール")
+        # 2-gram が含まれているか
+        assert "ファイ" in tokens or "イア" in tokens or "アボ" in tokens
+
+    def test_tokenize_ja_extracts_ascii(self):
+        """英数字が正しく抽出される。"""
+        from core.knowledge_manager import _tokenize_ja
+        tokens = _tokenize_ja("HP=20 MP=10")
+        assert "hp" in tokens or "mp" in tokens

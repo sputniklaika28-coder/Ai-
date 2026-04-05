@@ -37,6 +37,7 @@ from character_manager import CharacterManager
 from knowledge_manager import KnowledgeManager
 from lm_client import LMClient
 from main import PromptManager
+from memory_manager import MemoryManager
 from session_manager import SessionManager
 from vtt_adapters.ccfolia_adapter import CCFoliaAdapter
 
@@ -440,14 +441,24 @@ class SessionContext:
         "free": 0, "briefing": 1, "mission": 2, "combat": 3, "assessment": 4
     }
 
-    def __init__(self) -> None:
+    def __init__(self, lm_client=None) -> None:
         self.phase: str = "free"
-        self.history: list[dict] = []
+        # MemoryManager で履歴を管理（ローリング要約対応）
+        self._memory = MemoryManager(lm_client=lm_client)
+
+    def attach_lm_client(self, lm_client) -> None:
+        """起動後に LMClient を注入する（遅延初期化用）。"""
+        self._memory.lm_client = lm_client
 
     def set_phase_keywords(self, keywords: dict[str, list[str]]) -> None:
         """ルールアドオンからフェイズキーワードを動的に設定する。"""
         if keywords:
             self._PHASE_KEYWORDS = keywords
+
+    @property
+    def history(self) -> list[dict]:
+        """後方互換: 直近メッセージのリストを返す。"""
+        return self._memory.get_recent_messages()
 
     def update_phase(self, body: str, is_ai: bool = False) -> None:
         if is_ai:
@@ -461,13 +472,12 @@ class SessionContext:
             self.phase = new_phase
 
     def add_message(self, speaker: str, body: str, is_ai: bool = False) -> None:
-        self.history.append({"speaker": speaker, "body": body})
-        self.history = self.history[-100:]
+        self._memory.add_message(speaker, body)
         self.update_phase(body, is_ai)
 
     def get_context_summary(self) -> str:
-        lines = [f"[{m['speaker']}]: {m['body']}" for m in self.history[-25:]]
-        return f"【フェイズ: {self.phase.upper()}】\n【直近の会話】\n" + "\n".join(lines)
+        ctx = self._memory.get_context_window()
+        return f"【フェイズ: {self.phase.upper()}】\n{ctx}" if ctx else f"【フェイズ: {self.phase.upper()}】"
 
 
 # ==========================================
@@ -500,7 +510,8 @@ class CCFoliaConnector:
         self.cm = CharacterManager(str(_ROOT_DIR / "configs" / "characters.json"))
         self.pm = PromptManager(str(_ROOT_DIR / "configs" / "prompts.json"))
         self.detector = CharacterDetector(self.cm, default_id=default_character_id)
-        self.ctx = SessionContext()
+        # SessionContext に LMClient を注入してローリング要約を有効化
+        self.ctx = SessionContext(lm_client=self.lm_client)
         self.sm = SessionManager(_ROOT_DIR)
         self.world_setting = self._load_world_setting()
 

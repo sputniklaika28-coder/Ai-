@@ -1,10 +1,14 @@
-"""knowledge_manager.py — RAG（ベクトル検索）+ Web検索 統合マネージャー。
+"""knowledge_manager.py — RAG（ハイブリッド検索）+ Web検索 統合マネージャー。
 
-ChromaDB を使ったローカルベクトルDB検索と、
-DuckDuckGo Search を使ったウェブ検索を統合的に提供する。
+ChromaDB ベクトル検索 と BM25 キーワード検索を組み合わせたハイブリッド検索を提供する。
+Reciprocal Rank Fusion (RRF) でランキングを統合し、固有名詞の取りこぼしを防ぐ。
 
-ルールブック、世界観設定、セッションログなどを
-チャンク分割してベクトルDBに登録し、LLMが検索ツールとして利用する。
+BM25 が未インストールの場合は従来のベクトル検索のみにフォールバックする。
+
+Phase 3 改善:
+- ハイブリッド検索: ChromaDB（意味的類似）+ BM25（キーワード一致）
+- Reciprocal Rank Fusion: 両ランキングを融合して精度向上
+- Contextual Chunking: チャンク登録時にセクションヘッダを付与
 """
 
 from __future__ import annotations
@@ -20,9 +24,34 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
 
+# RRF パラメータ
+_RRF_K = 60  # RRF の定数（60 が一般的な推奨値）
+
+
+def _tokenize_ja(text: str) -> list[str]:
+    """日本語テキストを文字 n-gram + 英数字単語でトークナイズする。
+
+    mecab 等が不要なシンプルな実装:
+    - 英数字・記号は単語単位
+    - 漢字/仮名は 2-gram でトークナイズ
+    固有名詞（「ファイアボール」等）の取りこぼしを大幅に減らす。
+    """
+    tokens: list[str] = []
+    # 英数字単語
+    for m in re.finditer(r"[a-zA-Z0-9]+", text):
+        tokens.append(m.group().lower())
+    # 日本語（CJK + 仮名）の 2-gram
+    cjk_chars = re.sub(r"[^\u3000-\u9fff\uff00-\uffef]", "", text)
+    for i in range(len(cjk_chars) - 1):
+        tokens.append(cjk_chars[i : i + 2])
+    return tokens
+
 
 class KnowledgeManager:
-    """RAG ベクトル検索 + ウェブ検索を提供するナレッジマネージャー。
+    """RAG ハイブリッド検索 + ウェブ検索を提供するナレッジマネージャー。
+
+    ベクトル検索 (ChromaDB) と BM25 キーワード検索を組み合わせ、
+    Reciprocal Rank Fusion で結果をマージして高精度な検索を実現する。
 
     Attributes:
         client: ChromaDB の永続化クライアント。
@@ -33,18 +62,25 @@ class KnowledgeManager:
         self,
         persist_dir: str = "data/chroma_db",
         collection_name: str = "tactical_ai_knowledge",
+        use_hybrid: bool = True,
     ) -> None:
         """KnowledgeManager を初期化する。
 
         Args:
             persist_dir: ChromaDB の永続化ディレクトリ。
             collection_name: 使用するコレクション名。
+            use_hybrid: True の場合 BM25 ハイブリッド検索を試みる。
         """
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
+        self._use_hybrid = use_hybrid
 
         self.client = None
         self.collection = None
+
+        # BM25 インデックス（インメモリ）
+        self._bm25 = None            # BM25Okapi インスタンス
+        self._bm25_corpus: list[str] = []  # 登録済みドキュメント（生テキスト）
 
         try:
             import chromadb
@@ -70,6 +106,19 @@ class KnowledgeManager:
                 " pip install chromadb でインストールしてください。"
             )
 
+        # BM25 ライブラリのロード試行
+        self._bm25_available = False
+        if use_hybrid:
+            try:
+                from rank_bm25 import BM25Okapi  # noqa: F401
+                self._bm25_available = True
+                logger.info("BM25 ハイブリッド検索が有効です")
+            except ImportError:
+                logger.info(
+                    "rank-bm25 が未インストールです。ベクトル検索のみで動作します。"
+                    " pip install rank-bm25 でハイブリッド検索が有効になります。"
+                )
+
     # ──────────────────────────────────────────
     # ドキュメント登録
     # ──────────────────────────────────────────
@@ -80,7 +129,7 @@ class KnowledgeManager:
         metadatas: list[dict] | None = None,
         source: str = "unknown",
     ) -> int:
-        """テキストをベクトルDBに登録する。
+        """テキストをベクトルDB（と BM25 インデックス）に登録する。
 
         Args:
             texts: 登録するテキストチャンクのリスト。
@@ -106,14 +155,38 @@ class KnowledgeManager:
 
         self.collection.add(documents=texts, metadatas=metadatas, ids=ids)
         logger.info("%d 件のドキュメントを登録しました (source=%s)", len(texts), source)
+
+        # BM25 コーパスに追加してインデックスを再構築
+        if self._bm25_available:
+            self._bm25_corpus.extend(texts)
+            self._rebuild_bm25()
+
         return len(texts)
 
+    def _rebuild_bm25(self) -> None:
+        """BM25 インデックスを全コーパスで再構築する。"""
+        if not self._bm25_available or not self._bm25_corpus:
+            return
+        try:
+            from rank_bm25 import BM25Okapi
+            tokenized = [_tokenize_ja(doc) for doc in self._bm25_corpus]
+            self._bm25 = BM25Okapi(tokenized)
+        except Exception as e:
+            logger.warning("BM25 インデックス構築エラー: %s", e)
+            self._bm25 = None
+
     # ──────────────────────────────────────────
-    # ベクトル検索
+    # 検索
     # ──────────────────────────────────────────
 
     def search_knowledge_base(self, query: str, n_results: int = 5) -> list[dict]:
-        """ベクトル類似検索でドキュメントを検索する。
+        """ハイブリッド検索でドキュメントを検索する。
+
+        BM25 が利用可能な場合:
+          ベクトル検索 + BM25 → Reciprocal Rank Fusion で統合
+
+        BM25 が利用できない場合:
+          従来のベクトル類似検索のみ
 
         Args:
             query: 検索クエリテキスト。
@@ -123,7 +196,8 @@ class KnowledgeManager:
             検索結果のリスト。各要素は以下のキーを含む:
             - text: str — マッチしたテキスト
             - metadata: dict — メタデータ
-            - distance: float — コサイン距離（小さいほど類似）
+            - distance: float — コサイン距離（ハイブリッド時は 0.0）
+            - score: float — RRF スコア（ハイブリッド時のみ）
         """
         if self.collection is None:
             logger.warning("ChromaDB 未初期化のため検索をスキップしました。")
@@ -133,6 +207,14 @@ class KnowledgeManager:
             logger.warning("コレクションが空です。先にドキュメントを登録してください。")
             return []
 
+        # ハイブリッド検索
+        if self._bm25_available and self._bm25 is not None and self._bm25_corpus:
+            return self._hybrid_search(query, n_results)
+        else:
+            return self._vector_search(query, n_results)
+
+    def _vector_search(self, query: str, n_results: int) -> list[dict]:
+        """ChromaDB のみによるベクトル類似検索。"""
         results = self.collection.query(
             query_texts=[query],
             n_results=min(n_results, self.collection.count()),
@@ -146,6 +228,67 @@ class KnowledgeManager:
             for doc, meta, dist in zip(docs, metas, dists, strict=False):
                 output.append({"text": doc, "metadata": meta, "distance": dist})
 
+        return output
+
+    def _hybrid_search(self, query: str, n_results: int) -> list[dict]:
+        """ベクトル検索 + BM25 を RRF でマージするハイブリッド検索。"""
+        fetch_k = min(n_results * 3, self.collection.count())
+
+        # 1. ベクトル検索（多めに取得）
+        vec_results = self.collection.query(
+            query_texts=[query],
+            n_results=fetch_k,
+        )
+
+        vec_docs: list[str] = []
+        vec_metas: list[dict] = []
+        vec_dists: list[float] = []
+        if vec_results and vec_results["documents"]:
+            vec_docs = vec_results["documents"][0]
+            vec_metas = vec_results["metadatas"][0] if vec_results["metadatas"] else [{}] * len(vec_docs)
+            vec_dists = vec_results["distances"][0] if vec_results["distances"] else [0.0] * len(vec_docs)
+
+        # 2. BM25 検索（コーパス全体に対して）
+        query_tokens = _tokenize_ja(query)
+        bm25_scores = self._bm25.get_scores(query_tokens)
+        bm25_ranked = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)
+        bm25_top = bm25_ranked[: fetch_k]
+
+        # 3. Reciprocal Rank Fusion
+        rrf_scores: dict[str, float] = {}
+        doc_map: dict[str, dict] = {}  # text -> {text, metadata, distance}
+
+        # ベクトル検索のランキングを RRF に組み込む
+        for rank, (doc, meta, dist) in enumerate(zip(vec_docs, vec_metas, vec_dists)):
+            key = doc[:100]  # 先頭100文字をキーとして使用
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (_RRF_K + rank + 1)
+            doc_map[key] = {"text": doc, "metadata": meta, "distance": dist, "score": 0.0}
+
+        # BM25 のランキングを RRF に組み込む
+        for rank, corpus_idx in enumerate(bm25_top):
+            if corpus_idx >= len(self._bm25_corpus):
+                continue
+            doc = self._bm25_corpus[corpus_idx]
+            key = doc[:100]
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (_RRF_K + rank + 1)
+            if key not in doc_map:
+                doc_map[key] = {"text": doc, "metadata": {}, "distance": 0.0, "score": 0.0}
+
+        # 4. RRF スコアでソートして上位 n_results を返す
+        sorted_keys = sorted(rrf_scores.keys(), key=lambda k: rrf_scores[k], reverse=True)
+        output: list[dict] = []
+        for key in sorted_keys[:n_results]:
+            entry = dict(doc_map[key])
+            entry["score"] = rrf_scores[key]
+            output.append(entry)
+
+        logger.debug(
+            "ハイブリッド検索完了: query=%r, vec=%d件, bm25=%d件, merged=%d件",
+            query[:30],
+            len(vec_docs),
+            len(bm25_top),
+            len(output),
+        )
         return output
 
     # ──────────────────────────────────────────
@@ -192,11 +335,14 @@ class KnowledgeManager:
             return []
 
     # ──────────────────────────────────────────
-    # データ取り込み
+    # データ取り込み（Contextual Chunking）
     # ──────────────────────────────────────────
 
     def ingest_world_setting(self, path: str | Path) -> int:
-        """world_setting.json をチャンク分割してベクトルDBに登録する。
+        """world_setting.json をコンテキスト付きチャンクに分割してベクトルDBに登録する。
+
+        Contextual Chunking: 各チャンクにセクションキー（章タイトル）を付与し、
+        固有名詞検索時の取りこぼしを防ぐ。
 
         Args:
             path: world_setting.json のパス。
@@ -213,17 +359,55 @@ class KnowledgeManager:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
 
-            # world_setting.json は {key: value_text, ...} の形式
-            full_text = "\n".join(v for v in data.values() if isinstance(v, str) and v)
-            chunks = self._split_text(full_text)
+            all_chunks: list[str] = []
+            all_metas: list[dict] = []
+
+            for section_key, section_text in data.items():
+                if not isinstance(section_text, str) or not section_text:
+                    continue
+
+                raw_chunks = self._split_text(section_text)
+                for i, chunk in enumerate(raw_chunks):
+                    # コンテキストヘッダを付与（セクション名 + チャンク内容）
+                    contextual_chunk = f"【{section_key}】\n{chunk}"
+                    all_chunks.append(contextual_chunk)
+                    all_metas.append({
+                        "source": "world_setting",
+                        "section": section_key,
+                        "chunk_index": i,
+                    })
 
             return self.add_documents(
-                texts=chunks,
-                metadatas=[{"source": "world_setting", "chunk_index": i} for i in range(len(chunks))],
+                texts=all_chunks,
+                metadatas=all_metas,
                 source="world_setting",
             )
         except Exception as e:
             logger.error("世界観データ取り込みエラー: %s", e)
+            return 0
+
+    def ingest_rulebook(self, path: str | Path, source_name: str = "rulebook") -> int:
+        """テキストファイル（ルールブック等）をチャンクに分割して登録する。
+
+        Args:
+            path: テキストファイルのパス。
+            source_name: メタデータの source 値。
+
+        Returns:
+            登録されたチャンク数。
+        """
+        path = Path(path)
+        if not path.exists():
+            logger.warning("ファイルが見つかりません: %s", path)
+            return 0
+
+        try:
+            text = path.read_text(encoding="utf-8")
+            chunks = self._split_text(text)
+            metas = [{"source": source_name, "chunk_index": i} for i in range(len(chunks))]
+            return self.add_documents(texts=chunks, metadatas=metas, source=source_name)
+        except Exception as e:
+            logger.error("ルールブック取り込みエラー: %s", e)
             return 0
 
     def ingest_session_log(self, path: str | Path) -> int:
@@ -258,8 +442,7 @@ class KnowledgeManager:
             if not entries:
                 return 0
 
-            # セッションログは会話の流れが重要なので、
-            # 複数エントリをまとめてチャンク化する
+            # セッションログは会話の流れが重要なので、複数エントリをまとめてチャンク化
             full_text = "\n".join(entries)
             chunks = self._split_text(full_text, chunk_size=800, overlap=100)
 
@@ -366,4 +549,7 @@ class KnowledgeManager:
         return {
             "document_count": self.collection.count() if self.collection is not None else 0,
             "persist_dir": str(self.persist_dir),
+            "bm25_available": self._bm25_available,
+            "bm25_corpus_size": len(self._bm25_corpus),
+            "hybrid_search": self._bm25_available and self._bm25 is not None,
         }
