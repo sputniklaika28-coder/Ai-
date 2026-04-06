@@ -212,6 +212,25 @@ class AddonManager:
         """ロード済みアドオンの辞書を返す。"""
         return dict(self._addons)
 
+    @property
+    def manifests(self) -> dict[str, AddonManifest]:
+        """検出済みのマニフェスト一覧を返す"""
+        return dict(self._manifests)
+
+    def load_enabled(self, enabled_ids: list[str], context: AddonContext) -> None:
+        """指定されたIDリストのアドオンのみをロードする"""
+        if not self._manifests:
+            self.discover()
+
+        for addon_id in enabled_ids:
+            if addon_id in self._manifests:
+                try:
+                    self.load_addon(addon_id, context)
+                except Exception as e:
+                    logger.error("アドオンロード失敗: %s: %s", addon_id, e)
+            else:
+                logger.warning("有効化されたアドオンが見つかりません: %s", addon_id)
+
     # ──────────────────────────────────────────
     # 依存解決
     # ──────────────────────────────────────────
