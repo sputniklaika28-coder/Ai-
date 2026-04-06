@@ -126,6 +126,10 @@ class AddonManagementTab(tk.Frame):
         self._refresh_list()
 
     def _load_manifests(self):
+        import sys
+        root_dir = str(BASE_DIR)
+        if root_dir not in sys.path:
+            sys.path.insert(0, root_dir)
         from core.addons.addon_manager import AddonManager
         mgr = AddonManager(ADDONS_DIR)
         manifests_list = mgr.discover()
