@@ -16,6 +16,8 @@ from tkinter import messagebox, scrolledtext, ttk
 
 import requests
 
+from addon_management_tab import AddonManagementTab, AddonStateManager
+
 # --- パス設定 ---
 _THIS = Path(__file__).resolve()
 if _THIS.parent.name == "core":
@@ -2015,7 +2017,21 @@ class TacticalAILauncher(tk.Tk):
         style = ttk.Style(self)
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        style.configure("TNotebook.Tab", font=("", 11), padding=(12, 6))
+
+        # RimWorld風 ダークテーマ設定
+        BG_MAIN = "#1a1a2e"
+        FG_MAIN = "#e0e0e0"
+
+        style.configure(".", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TFrame", background=BG_MAIN)
+        style.configure("TLabel", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TButton", background="#16213e", foreground=FG_MAIN)
+        style.configure("TLabelframe", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TLabelframe.Label", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TCheckbutton", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TNotebook", background=BG_MAIN, borderwidth=0)
+        style.configure("TNotebook.Tab", background="#16213e", foreground=FG_MAIN, padding=(12, 6))
+        style.map("TNotebook.Tab", background=[("selected", "#1e2a3a")], foreground=[("selected", "#ffffff")])
 
     def _build_menu(self):
         menubar = tk.Menu(self)
@@ -2045,8 +2061,9 @@ class TacticalAILauncher(tk.Tk):
         self.tab_history = HistoryTab(self.notebook)
         self.tab_world = WorldSettingTab(self.notebook)
         self.tab_generator = GeneratorTab(self.notebook)
-        self.tab_env = EnvSettingsTab(self.notebook)
-        self.tab_deps = DependencyTab(self.notebook)
+
+        # 新設: アドオン管理タブ
+        self.tab_addon_mgr = AddonManagementTab(self.notebook)
 
         self.notebook.add(self.tab_launch, text=" ▶ CCFolia起動 ")
         self.notebook.add(self.tab_maker, text=" 🎲 キャラクターメーカー ")
@@ -2056,8 +2073,9 @@ class TacticalAILauncher(tk.Tk):
         self.notebook.add(self.tab_history, text=" 🕒 履歴 ")
         self.notebook.add(self.tab_world, text=" 🌍 世界観 ")
         self.notebook.add(self.tab_generator, text=" 🛠️ 汎用ジェネレーター ")
-        self.notebook.add(self.tab_env, text=" 🔧 環境設定 ")
-        self.notebook.add(self.tab_deps, text=" 📦 依存関係 ")
+
+        # アドオン管理タブの追加
+        self.notebook.add(self.tab_addon_mgr, text=" 🧩 アドオン管理 ")
 
         # アドオンGUIタブを動的に追加
         self._load_addon_tabs()
@@ -2065,21 +2083,29 @@ class TacticalAILauncher(tk.Tk):
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
     def _load_addon_tabs(self):
-        """addons/ フォルダをスキャンしてGUIタブを持つアドオンを探し動的追加する。"""
+        """addon_state.jsonを読み込み、有効なアドオンのGUIタブのみ動的追加する"""
         try:
             from pathlib import Path
             addons_dir = Path(__file__).resolve().parent.parent / "addons"
             if not addons_dir.is_dir():
                 return
+
             import sys
             root_dir = str(addons_dir.parent)
             if root_dir not in sys.path:
                 sys.path.insert(0, root_dir)
+
             from core.addons import AddonManager
-            # マニフェスト探索のみ（重いロードはしない）
+            # 状態管理ファイルから有効なアドオンIDを取得
+            state_mgr = AddonStateManager(CONFIGS_DIR / "addon_state.json")
+            enabled_ids = state_mgr.state.get("enabled", [])
+
             mgr = AddonManager(addons_dir=addons_dir)
-            for manifest in mgr.discover():
-                if manifest.gui_tab and manifest.gui_tab_label:
+            manifests = mgr.discover()
+
+            for manifest in manifests:
+                # 有効なアドオンかつGUIタブを持つ場合のみ処理
+                if manifest.id in enabled_ids and manifest.gui_tab and manifest.gui_tab_label:
                     try:
                         import importlib.util
                         addon_dir = addons_dir / manifest.id
