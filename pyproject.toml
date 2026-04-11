@@ -18,6 +18,7 @@ dependencies = [
     "duckduckgo-search>=6.0",
     "pydantic>=2.0",
     "rank-bm25>=0.2",
+    "customtkinter>=5.2",
 ]
 
 [project.optional-dependencies]
