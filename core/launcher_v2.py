@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import queue as _queue
 import re
 import shutil
 import subprocess
@@ -162,6 +163,21 @@ def _setup_ctk_appearance() -> None:
     """CustomTkinter のグローバル外観設定"""
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
+
+
+# ─────────────────────────────────────────────────────────────────
+# スレッドセーフ UI スケジューラー
+# Python 3.14 以降、バックグラウンドスレッドから widget.after() を
+# 直接呼ぶと RuntimeError になるため queue.Queue 経由で安全にポスト。
+# TacticalAILauncherV2 が 40ms ごとにキューをドレインする。
+# ─────────────────────────────────────────────────────────────────
+
+_UI_QUEUE: _queue.SimpleQueue = _queue.SimpleQueue()
+
+
+def _post_to_main(fn) -> None:
+    """バックグラウンドスレッドから UI コールバックをメインスレッドへ安全に転送する"""
+    _UI_QUEUE.put(fn)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -356,8 +372,8 @@ class StatusBar(ctk.CTkFrame):
     def _poll_lm(self) -> None:
         def check():
             ok = check_lm_studio()
-            self.after(0, lambda: self.set_lm_status(ok))
-            self.after(10_000, self._poll_lm)
+            _post_to_main(lambda: self.set_lm_status(ok))
+            _post_to_main(lambda: self.after(10_000, self._poll_lm))
         threading.Thread(target=check, daemon=True).start()
 
     def _poll_memory(self) -> None:
@@ -752,7 +768,7 @@ class HomeView(ctk.CTkFrame):
     def _update_lm_status(self) -> None:
         def check():
             ok = check_lm_studio()
-            self.after(0, lambda: self._set_lm_status(ok))
+            _post_to_main(lambda: self._set_lm_status(ok))
         threading.Thread(target=check, daemon=True).start()
 
     def _set_lm_status(self, ok: bool) -> None:
@@ -835,9 +851,9 @@ class HomeView(ctk.CTkFrame):
         if not self._proc:
             return
         for line in self._proc.stdout:
-            self.after(0, lambda l=line: self._log(l))
+            _post_to_main(lambda l=line: self._log(l))
         ret = self._proc.wait()
-        self.after(0, lambda: self._on_proc_finished(ret))
+        _post_to_main(lambda: self._on_proc_finished(ret))
 
     def _on_proc_finished(self, returncode: int) -> None:
         self._proc = None
@@ -1638,7 +1654,7 @@ class ActorsView(ctk.CTkFrame):
                 user_message=self._build_char_prompt(user_req),
                 temperature=0.7, max_tokens=1500, timeout=None, no_think=True,
             )
-            self.after(0, self._on_gen_finish, result)
+            _post_to_main(lambda r=result: self._on_gen_finish(r))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2273,10 +2289,10 @@ class AIConfigView(ctk.CTkFrame):
                     system_prompt=sys_prompt, user_message=user_msg,
                     temperature=0.4, max_tokens=8192, timeout=None,
                 )
-                self.after(0, self._gen_finish, result)
+                _post_to_main(lambda r=result: self._gen_finish(r))
             except Exception as e:
-                self.after(0, lambda err=e: self._gen_status_var.set(f"❌ 内部エラー: {err}"))
-                self.after(0, lambda: self._gen_btn.configure(state="normal"))
+                _post_to_main(lambda err=e: self._gen_status_var.set(f"❌ 内部エラー: {err}"))
+                _post_to_main(lambda: self._gen_btn.configure(state="normal"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2539,11 +2555,11 @@ class SystemView(ctk.CTkFrame):
                 if r.status_code == 200:
                     models = [m.get("id", "?") for m in r.json().get("data", [])]
                     model_text = ", ".join(models[:5]) if models else "(モデル未ロード)"
-                    self.after(0, lambda: self._set_lm_result(True, model_text))
+                    _post_to_main(lambda mt=model_text: self._set_lm_result(True, mt))
                 else:
-                    self.after(0, lambda: self._set_lm_result(False, f"HTTP {r.status_code}"))
+                    _post_to_main(lambda s=r.status_code: self._set_lm_result(False, f"HTTP {s}"))
             except Exception as exc:
-                self.after(0, lambda: self._set_lm_result(False, str(exc)))
+                _post_to_main(lambda e=str(exc): self._set_lm_result(False, e))
 
         threading.Thread(target=_check, daemon=True).start()
 
@@ -2663,7 +2679,7 @@ class SystemView(ctk.CTkFrame):
 
             def _run():
                 ok, output = install_group(group)
-                self.after(0, lambda: self._dep_install_done(ok, group, output))
+                _post_to_main(lambda o=ok, out=output: self._dep_install_done(o, group, out))
 
             threading.Thread(target=_run, daemon=True).start()
         except Exception as e:
@@ -2741,6 +2757,7 @@ class TacticalAILauncherV2(ctk.CTk):
         self._load_addon_sidebar_slots()
         self._show_view("home")
         self.status_bar.start_polling()
+        self.after(40, self._drain_ui_queue)
 
     def _build_layout(self) -> None:
         # grid で3ペイン固定配置
@@ -2843,6 +2860,15 @@ class TacticalAILauncherV2(ctk.CTk):
             print(f"[launcher_v2] アドオンスキャンエラー: {e}")
 
     # ── メニュー的なヘルパー ──────────────────────────────────────
+
+    def _drain_ui_queue(self) -> None:
+        """バックグラウンドスレッドからポストされた UI コールバックをメインスレッドで実行"""
+        try:
+            while True:
+                _UI_QUEUE.get_nowait()()
+        except _queue.Empty:
+            pass
+        self.after(40, self._drain_ui_queue)
 
     def get_home_view(self) -> HomeView:
         return self._views["home"]  # type: ignore[return-value]
