@@ -1,0 +1,12 @@
+{
+  "id": "character_manager",
+  "name": "キャラクターマネージャー",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "全ルールシステム共通のキャラクターデータ保存・読み込みアドオン。各システムアドオンで作られたキャラクターをファイルとして管理します。",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "CharacterManagerAddon",
+  "tools": ["save_character", "load_character", "list_characters", "delete_character"]
+}

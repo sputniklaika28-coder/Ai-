@@ -1,0 +1,12 @@
+{
+  "id": "session_manager",
+  "name": "セッションマネージャー",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "全ルールシステム共通のセッション記録・履歴管理アドオン。チャット履歴の保存やゲームの進行状況を記録します。",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "SessionManagerAddon",
+  "tools": ["start_session", "log_message", "list_sessions", "get_session_history"]
+}
