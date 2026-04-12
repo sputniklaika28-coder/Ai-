@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -541,6 +542,25 @@ class CCFoliaConnector:
             core_dir=_CORE_DIR,
         )
 
+        # async/sync ブリッジ用の専用イベントループ（バックグラウンドスレッドで実行）
+        self._async_loop = asyncio.new_event_loop()
+        self._async_thread = threading.Thread(
+            target=self._async_loop.run_forever, daemon=True, name="AsyncBridge"
+        )
+        self._async_thread.start()
+
+    # ──────────────────────────────────────────
+    # async/sync ブリッジ
+    # ──────────────────────────────────────────
+
+    def _run_async(self, coro):
+        """バックグラウンドの asyncio ループでコルーチンを実行し、結果を返す。
+
+        Playwright（非スレッドセーフ）を同期コードから安全に呼び出すための橋渡し。
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self._async_loop)
+        return future.result()
+
     # ──────────────────────────────────────────
     # 初期化 / 終了
     # ──────────────────────────────────────────
@@ -551,7 +571,7 @@ class CCFoliaConnector:
             # CDP接続: GMが既に開いているブラウザに接続（権限継承）
             print(f"⏳ 既存ブラウザにCDP接続しています... ({self.cdp_url})")
             self.adapter = CCFoliaAdapter()
-            self.adapter.connect(self.room_url, cdp_url=self.cdp_url)
+            self._run_async(self.adapter.connect(self.room_url, cdp_url=self.cdp_url))
             self._health.vtt_mode = "cdp"
         elif self._use_browser_use:
             print("⏳ Browser Use でブラウザを起動しています...")
@@ -583,7 +603,7 @@ class CCFoliaConnector:
             self._health.vtt_mode = "playwright"
 
         if not self.cdp_url:
-            self.adapter.connect(self.room_url, headless=self.headless)
+            self._run_async(self.adapter.connect(self.room_url, headless=self.headless))
         self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
         self._health.vtt_connected = True
         mode = {"cdp": "CDP", "browser_use": "Browser Use", "playwright": "Playwright"}.get(
@@ -653,7 +673,7 @@ class CCFoliaConnector:
         """VTTアダプターを閉じる。"""
         if self.adapter:
             try:
-                self.adapter.close()
+                self._run_async(self.adapter.close())
             except Exception:
                 pass
             finally:
@@ -691,11 +711,11 @@ class CCFoliaConnector:
     def _check_lm_health(self) -> bool:
         """LMクライアントの到達性を確認する。"""
         try:
-            res, _ = self.lm_client.generate_response(
+            res, _ = self._run_async(self.lm_client.generate_response(
                 system_prompt="ping",
                 user_message="返事をしてください",
                 max_tokens=10,
-            )
+            ))
             reachable = bool(res)
         except Exception:
             reachable = False
@@ -710,13 +730,13 @@ class CCFoliaConnector:
         """チャットメッセージを取得する。"""
         if self.adapter is None:
             return []
-        return self.adapter.get_chat_messages()
+        return self._run_async(self.adapter.get_chat_messages())
 
     def _post_message(self, character_name: str, text: str) -> bool:
         """チャットメッセージを送信する。"""
         if self.adapter is None:
             return False
-        return self.adapter.send_chat(character_name, text)
+        return self._run_async(self.adapter.send_chat(character_name, text))
 
     def _post_system_message(self, character_name: str, text: str) -> None:
         """AIプレフィックス付きのシステムメッセージを送信する。"""
@@ -855,19 +875,19 @@ class CCFoliaConnector:
                 screenshot_b64: str | None = None
                 if self.adapter:
                     try:
-                        raw = self.adapter.take_screenshot()
+                        raw = self._run_async(self.adapter.take_screenshot())
                         if raw:
                             screenshot_b64 = base64.b64encode(raw).decode("ascii")
                     except Exception:
                         pass
 
-                content, tool_calls = self.lm_client.generate_with_tools(
+                content, tool_calls = self._run_async(self.lm_client.generate_with_tools(
                     messages,
                     self._get_all_tools(),
                     temperature=0.7,
                     max_tokens=1500,
                     image_base64=screenshot_b64,
-                )
+                ))
 
                 if content is None and tool_calls is None:
                     print("   ⚠️ APIからの応答がありませんでした。ループを中断します。")
@@ -1048,11 +1068,11 @@ class CCFoliaConnector:
                                 "プレイヤーへの返答テキストを直ちに出力してください。"
                             )
 
-                            res, _ = self.lm_client.generate_response(
+                            res, _ = self._run_async(self.lm_client.generate_response(
                                 system_prompt=sys_prompt,
                                 user_message=enriched,
                                 max_tokens=4096,
-                            )
+                            ))
 
                             if res:
                                 self._post_message(target_char["name"], f"[AI] {res}")
