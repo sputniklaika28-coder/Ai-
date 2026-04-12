@@ -103,7 +103,7 @@ class MemoryManager:
                 and not self._summarizing
             ):
                 self._summarizing = True
-                t = threading.Thread(target=self._compress_history, daemon=True)
+                t = threading.Thread(target=self._compress_history, daemon=False)
                 t.start()
 
     # ──────────────────────────────────────────
@@ -154,10 +154,8 @@ class MemoryManager:
             with self._lock:
                 if len(self._recent) < self.summary_threshold:
                     return
-
-                # 圧縮対象: 直近 recent_keep 件より古いもの
+                # スナップショットのみ。_recent はまだ触らない
                 to_compress = self._recent[: -self.recent_keep]
-                self._recent = self._recent[-self.recent_keep :]
 
             if not to_compress:
                 return
@@ -166,18 +164,26 @@ class MemoryManager:
             raw_text = "\n".join(
                 f"[{m['speaker']}]: {m['body']}" for m in to_compress
             )
-            if self._summary:
-                full_text = f"【前回までのあらすじ】\n{self._summary}\n\n【続き】\n{raw_text}"
-            else:
-                full_text = raw_text
+            full_text = (
+                f"【前回までのあらすじ】\n{self._summary}\n\n【続き】\n{raw_text}"
+                if self._summary else raw_text
+            )
 
             new_summary = self._call_summary_llm(full_text)
 
+            if not new_summary:
+                # 要約失敗 → _recent 保持、次回再試行
+                logger.warning("要約失敗 — 元のメッセージを保持します。次の閾値到達時に再試行します。")
+                return
+
+            # 要約成功 → ここで初めて _recent を削減
             with self._lock:
+                # LLM呼び出し中に追加されたメッセージも保全するため、先頭からN件削除
+                self._recent = self._recent[len(to_compress):]
                 self._summary = new_summary
                 self._summary_count += 1
                 logger.info(
-                    "履歴要約完了: %d件 → %d文字の要約 (計%d回目)",
+                    "履歴要約完了: %d件 → %d文字 (計%d回目)",
                     len(to_compress),
                     len(new_summary),
                     self._summary_count,
@@ -188,21 +194,21 @@ class MemoryManager:
             self._summarizing = False
 
     def _call_summary_llm(self, text: str) -> str:
-        """LLM でテキストを要約する。失敗時は切り詰めにフォールバック。"""
+        """LLM でテキストを要約する。失敗時は空文字を返す（呼び出し元でハンドリング）。"""
         if self.lm_client is None:
-            return self._fallback_truncate(text)
+            return ""  # LLM なし → 要約しない（_recent を保持）
 
         try:
-            result, _ = self.lm_client.generate_response(
-                prompt=f"以下のセッションログを要約してください:\n\n{text}",
-                system=self._SUMMARY_SYSTEM_PROMPT,
+            result, _ = self.lm_client.generate_response_sync(
+                system_prompt=self._SUMMARY_SYSTEM_PROMPT,
+                user_message=f"以下のセッションログを要約してください:\n\n{text}",
                 temperature=self.SUMMARY_TEMPERATURE,
                 max_tokens=self.SUMMARY_MAX_TOKENS,
             )
-            return result.strip() if result else self._fallback_truncate(text)
+            return result.strip() if result else ""
         except Exception as e:
-            logger.warning("LLM要約エラー: %s、フォールバック使用", e)
-            return self._fallback_truncate(text)
+            logger.warning("LLM要約エラー: %s — 次回再試行します", e)
+            return ""
 
     @staticmethod
     def _fallback_truncate(text: str, max_lines: int = 20) -> str:
