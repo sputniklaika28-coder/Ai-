@@ -25,7 +25,7 @@ from core.memory_manager import MemoryManager, MemoryStats
 def mock_lm():
     """LMClient モック: 要約を固定テキストで返す。"""
     lm = MagicMock()
-    lm.generate_response.return_value = ("これまでのあらすじ要約", None)
+    lm.generate_response_sync.return_value = ("これまでのあらすじ要約", None)
     return lm
 
 
@@ -134,7 +134,7 @@ class TestRollingSummary:
                 break
 
         stats = mem.get_stats()
-        assert stats.summary_count >= 1 or mock_lm.generate_response.called
+        assert stats.summary_count >= 1 or mock_lm.generate_response_sync.called
 
     def test_recent_keep_after_summary(self, mem: MemoryManager, mock_lm):
         """要約後も recent_keep 件のメッセージが残る。"""
@@ -166,7 +166,8 @@ class TestRollingSummary:
 
 
 class TestFallbackWithoutLM:
-    def test_fallback_truncate_used_when_no_lm(self):
+    def test_messages_retained_when_no_lm(self):
+        """lm_client=None の場合、要約は行われず _recent が保持される（データロストなし）。"""
         m = MemoryManager(lm_client=None, summary_threshold=3, recent_keep=1)
         for i in range(3):
             m.add_message("GM", f"msg{i}")
@@ -176,8 +177,25 @@ class TestFallbackWithoutLM:
             if not m._summarizing:
                 break
 
-        # LMなしでも要約（切り詰め）が実行される
-        assert m.get_stats().summary_count >= 1 or len(m.get_recent_messages()) <= 2
+        # LMなし → 要約失敗 → _recent を保持
+        assert m.get_stats().summary_count == 0
+        assert len(m.get_recent_messages()) == 3
+
+    def test_messages_retained_when_llm_fails(self):
+        """LLM が空文字を返した場合、_recent は削減されずに保持される。"""
+        lm = MagicMock()
+        lm.generate_response_sync.return_value = ("", None)  # 要約失敗
+        m = MemoryManager(lm_client=lm, summary_threshold=3, recent_keep=1)
+        for i in range(3):
+            m.add_message("GM", f"msg{i}")
+
+        for _ in range(20):
+            time.sleep(0.1)
+            if not m._summarizing:
+                break
+
+        assert m.get_stats().summary_count == 0
+        assert len(m.get_recent_messages()) == 3
 
     def test_fallback_truncate_static_method(self):
         long_text = "\n".join([f"行{i}: テスト内容" for i in range(50)])

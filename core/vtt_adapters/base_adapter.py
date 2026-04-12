@@ -1,4 +1,4 @@
-"""base_adapter.py - VTT操作の抽象インターフェース（同期API）。
+"""base_adapter.py - VTT操作の抽象インターフェース（非同期API）。
 
 すべてのVTTアダプター（CCFolia、ユドナリウム等）はこのクラスを継承し、
 統一されたインターフェースでブラウザ操作を提供する。
@@ -15,8 +15,8 @@ class BaseVTTAdapter(ABC):
     """
 
     @abstractmethod
-    def connect(self, room_url: str, headless: bool = False,
-                cdp_url: str | None = None) -> None:
+    async def connect(self, room_url: str, headless: bool = False,
+                      cdp_url: str | None = None) -> None:
         """VTTルームに接続する。
 
         Args:
@@ -27,31 +27,31 @@ class BaseVTTAdapter(ABC):
         """
 
     @abstractmethod
-    def close(self) -> None:
+    async def close(self) -> None:
         """ブラウザを閉じて接続を切断する。"""
 
     @abstractmethod
-    def get_board_state(self) -> list[dict]:
+    async def get_board_state(self) -> list[dict]:
         """ボード上の全駒の位置情報を取得する。"""
 
     @abstractmethod
-    def move_piece(self, piece_id: str, grid_x: int, grid_y: int) -> bool:
+    async def move_piece(self, piece_id: str, grid_x: int, grid_y: int) -> bool:
         """駒を指定グリッド座標に移動する。"""
 
     @abstractmethod
-    def spawn_piece(self, character_json: dict) -> bool:
+    async def spawn_piece(self, character_json: dict) -> bool:
         """キャラクターデータをVTTに配置する。"""
 
     @abstractmethod
-    def send_chat(self, character_name: str, text: str) -> bool:
+    async def send_chat(self, character_name: str, text: str) -> bool:
         """チャットメッセージを送信する。"""
 
     @abstractmethod
-    def get_chat_messages(self) -> list[dict]:
+    async def get_chat_messages(self) -> list[dict]:
         """チャットメッセージ一覧を取得する。"""
 
     @abstractmethod
-    def take_screenshot(self) -> bytes | None:
+    async def take_screenshot(self) -> bytes | None:
         """画面のスクリーンショットを取得する。"""
 
     # Phase 2 オプショナルメソッド（非 abstract）

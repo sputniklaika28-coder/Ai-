@@ -12,6 +12,7 @@ description = "タクティカル祓魔師 TRPG AI — ローカル LLM を使�
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.31",
+    "httpx>=0.27",
     "selenium>=4.0",
     "playwright>=1.40",
     "chromadb>=0.4",
@@ -48,6 +49,7 @@ dev = [
 # ──────────────────────────────────────────
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 addopts = [
     "-v",
     "--tb=short",

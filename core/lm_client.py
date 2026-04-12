@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import re
 
-import requests
+import httpx
 
 
 class LMClient:
@@ -12,9 +13,10 @@ class LMClient:
         self.base_url = base_url
         self.model = model
 
-    def is_server_running(self) -> bool:
+    async def is_server_running(self) -> bool:
         try:
-            response = requests.get(f"{self.base_url}/v1/models", timeout=3)
+            async with httpx.AsyncClient(timeout=3) as client:
+                response = await client.get(f"{self.base_url}/v1/models")
             return response.status_code == 200
         except Exception:
             return False
@@ -112,7 +114,7 @@ class LMClient:
         thinking_ignored = not raw_content.strip() and has_reasoning
         return raw_content, thinking_ignored, finish_reason, content_was_empty
 
-    def generate_response(
+    async def generate_response(
         self,
         system_prompt: str,
         user_message: str,
@@ -125,8 +127,9 @@ class LMClient:
         repetition_penalty: float = 1.0,
         min_p: float = 0.0,
         no_think: bool = False,
+        json_mode: bool = False,
     ):
-        if not self.is_server_running():
+        if not await self.is_server_running():
             return None, None
 
         # Qwen3系などの思考モデルで思考を抑制する
@@ -157,11 +160,14 @@ class LMClient:
         }
         if no_think:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
 
         try:
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions", json=payload, timeout=timeout
-            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/chat/completions", json=payload
+                )
             if response.status_code == 200:
                 result = response.json()
                 raw_content, thinking_ignored, finish_reason, content_was_empty = (
@@ -197,11 +203,11 @@ class LMClient:
                         "max_tokens": max_tokens * 2,
                         "chat_template_kwargs": {"enable_thinking": False},
                     }
-                    retry_resp = requests.post(
-                        f"{self.base_url}/v1/chat/completions",
-                        json=retry_payload,
-                        timeout=timeout,
-                    )
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        retry_resp = await client.post(
+                            f"{self.base_url}/v1/chat/completions",
+                            json=retry_payload,
+                        )
                     if retry_resp.status_code == 200:
                         retry_result = retry_resp.json()
                         active_result = retry_result
@@ -229,11 +235,11 @@ class LMClient:
                                 "temperature": min(temperature + 0.1, 1.0),
                                 "chat_template_kwargs": {"enable_thinking": False},
                             }
-                            final_resp = requests.post(
-                                f"{self.base_url}/v1/chat/completions",
-                                json=final_payload,
-                                timeout=timeout,
-                            )
+                            async with httpx.AsyncClient(timeout=timeout) as client:
+                                final_resp = await client.post(
+                                    f"{self.base_url}/v1/chat/completions",
+                                    json=final_payload,
+                                )
                             if final_resp.status_code == 200:
                                 final_result = final_resp.json()
                                 active_result = final_result
@@ -249,7 +255,11 @@ class LMClient:
             print(f"   ⚠️  LM-Studio通信エラー: {str(e)}")
             return None, None
 
-    def generate_with_tools(
+    def generate_response_sync(self, *args, **kwargs):
+        """threading 環境からの呼び出し用同期ラッパー。"""
+        return asyncio.run(self.generate_response(*args, **kwargs))
+
+    async def generate_with_tools(
         self,
         messages: list[dict],
         tools: list[dict],
@@ -273,7 +283,7 @@ class LMClient:
             - content: モデルの出力テキスト（tool_callsがある場合は思考テキスト）。
             - tool_calls: ツール呼び出しリスト。呼び出しがない場合はNone。
         """
-        if not self.is_server_running():
+        if not await self.is_server_running():
             return None, None
 
         # メッセージを深コピーして画像を追加
@@ -310,11 +320,11 @@ class LMClient:
             payload["tool_choice"] = "auto"
 
         try:
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                json=payload,
-                timeout=timeout,
-            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                )
             if response.status_code == 200:
                 result = response.json()
                 message = result["choices"][0]["message"]

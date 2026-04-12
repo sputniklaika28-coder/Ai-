@@ -5,13 +5,60 @@ test_lm_client.py — LMClient のユニットテスト
   - is_server_running()
   - _clean_response()
   - generate_response()
+  - generate_with_tools()
 
-外部依存 requests はすべてモック化する。
+外部依存 httpx はすべてモック化する。
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from core.lm_client import LMClient
+
+
+# ──────────────────────────────────────────
+# ヘルパー
+# ──────────────────────────────────────────
+
+
+def _make_api_response(content: str):
+    """OpenAI 互換レスポンスの dict を作る"""
+    return {"choices": [{"message": {"content": content, "tool_calls": None}}]}
+
+
+def _make_httpx_resp(status_code: int, json_data=None):
+    """httpx レスポンスモックを作る"""
+    resp = MagicMock()
+    resp.status_code = status_code
+    if json_data is not None:
+        resp.json.return_value = json_data
+    return resp
+
+
+def _patch_httpx_post(*responses):
+    """httpx.AsyncClient をモック化する（post 用）。
+    returns: (patch_ctx, mock_client) のタプル。
+    """
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=list(responses))
+    mock_client.get = AsyncMock()
+    mock_instance = MagicMock()
+    mock_instance.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_instance.__aexit__ = AsyncMock(return_value=False)
+    return patch("core.lm_client.httpx.AsyncClient", return_value=mock_instance), mock_client
+
+
+def _patch_httpx_get(response):
+    """httpx.AsyncClient をモック化する（get 用）。"""
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=response)
+    mock_client.post = AsyncMock()
+    mock_instance = MagicMock()
+    mock_instance.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_instance.__aexit__ = AsyncMock(return_value=False)
+    return patch("core.lm_client.httpx.AsyncClient", return_value=mock_instance), mock_client
+
 
 # ──────────────────────────────────────────
 # is_server_running
@@ -19,32 +66,34 @@ from core.lm_client import LMClient
 
 
 class TestIsServerRunning:
-    def test_returns_true_when_200(self):
+    async def test_returns_true_when_200(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        with patch("core.lm_client.requests.get", return_value=mock_resp):
-            assert client.is_server_running() is True
+        patch_ctx, _ = _patch_httpx_get(_make_httpx_resp(200))
+        with patch_ctx:
+            assert await client.is_server_running() is True
 
-    def test_returns_false_when_non_200(self):
+    async def test_returns_false_when_non_200(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        with patch("core.lm_client.requests.get", return_value=mock_resp):
-            assert client.is_server_running() is False
+        patch_ctx, _ = _patch_httpx_get(_make_httpx_resp(500))
+        with patch_ctx:
+            assert await client.is_server_running() is False
 
-    def test_returns_false_on_connection_error(self):
+    async def test_returns_false_on_connection_error(self):
         client = LMClient()
-        with patch("core.lm_client.requests.get", side_effect=ConnectionError):
-            assert client.is_server_running() is False
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=ConnectionError)
+        mock_instance = MagicMock()
+        mock_instance.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_instance.__aexit__ = AsyncMock(return_value=False)
+        with patch("core.lm_client.httpx.AsyncClient", return_value=mock_instance):
+            assert await client.is_server_running() is False
 
-    def test_hits_correct_endpoint(self):
+    async def test_hits_correct_endpoint(self):
         client = LMClient(base_url="http://localhost:9999")
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        with patch("core.lm_client.requests.get", return_value=mock_resp) as mock_get:
-            client.is_server_running()
-            mock_get.assert_called_once_with("http://localhost:9999/v1/models", timeout=3)
+        patch_ctx, mock_client = _patch_httpx_get(_make_httpx_resp(200))
+        with patch_ctx:
+            await client.is_server_running()
+            mock_client.get.assert_called_once_with("http://localhost:9999/v1/models")
 
 
 # ──────────────────────────────────────────
@@ -85,7 +134,6 @@ class TestCleanResponse:
         assert result == ""
 
     def test_no_braces_returns_empty(self):
-        # 波括弧がなければ first_brace_idx == -1 → 元テキストをそのまま返す
         result = self.client._clean_response("hello world")
         assert "hello world" in result or result == "hello world"
 
@@ -101,555 +149,426 @@ class TestCleanResponse:
 
 
 class TestGenerateResponse:
-    def _make_api_response(self, content: str):
-        """OpenAI 互換レスポンスの dict を作る"""
-        return {"choices": [{"message": {"content": content, "tool_calls": None}}]}
-
-    def test_returns_none_when_server_down(self):
+    async def test_returns_none_when_server_down(self):
         client = LMClient()
-        with patch.object(client, "is_server_running", return_value=False):
-            content, tools = client.generate_response("sys", "user")
+        with patch.object(client, "is_server_running", new=AsyncMock(return_value=False)):
+            content, tools = await client.generate_response("sys", "user")
         assert content is None
         assert tools is None
 
-    def test_returns_cleaned_json(self):
+    async def test_returns_cleaned_json(self):
         client = LMClient()
-        raw = '{"action": "cast"}'
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = self._make_api_response(raw)
-
+        api_resp = _make_httpx_resp(200, _make_api_response('{"action": "cast"}'))
+        patch_ctx, _ = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user")
-
+            content, tools = await client.generate_response("sys", "user")
         assert content == '{"action": "cast"}'
         assert tools is None
 
-    def test_no_think_prepends_flag(self):
+    async def test_json_mode_adds_response_format(self):
         client = LMClient()
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = self._make_api_response('{"ok": true}')
-
+        api_resp = _make_httpx_resp(200, _make_api_response('{"ok": true}'))
+        patch_ctx, mock_client = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            client.generate_response("sys", "user", no_think=True)
+            await client.generate_response("sys", "user", json_mode=True)
+        payload = mock_client.post.call_args[1]["json"]
+        assert payload["response_format"] == {"type": "json_object"}
 
-        payload = mock_post.call_args[1]["json"]
+    async def test_no_think_prepends_flag(self):
+        client = LMClient()
+        api_resp = _make_httpx_resp(200, _make_api_response('{"ok": true}'))
+        patch_ctx, mock_client = _patch_httpx_post(api_resp)
+        with (
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
+        ):
+            await client.generate_response("sys", "user", no_think=True)
+        payload = mock_client.post.call_args[1]["json"]
         assert payload["messages"][0]["content"].startswith("/no_think")
         assert payload.get("chat_template_kwargs") == {"enable_thinking": False}
 
-    def test_returns_none_on_non_200(self):
+    async def test_returns_none_on_non_200(self):
         client = LMClient()
-        api_resp = MagicMock()
-        api_resp.status_code = 503
-
+        patch_ctx, _ = _patch_httpx_post(_make_httpx_resp(503))
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user")
-
+            content, tools = await client.generate_response("sys", "user")
         assert content is None
 
-    def test_returns_none_on_exception(self):
+    async def test_returns_none_on_exception(self):
         client = LMClient()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=TimeoutError)
+        mock_instance = MagicMock()
+        mock_instance.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_instance.__aexit__ = AsyncMock(return_value=False)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", side_effect=TimeoutError),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch("core.lm_client.httpx.AsyncClient", return_value=mock_instance),
         ):
-            content, tools = client.generate_response("sys", "user")
-
+            content, tools = await client.generate_response("sys", "user")
         assert content is None
 
-    def test_falls_back_to_reasoning_content_when_valid_json(self):
+    async def test_falls_back_to_reasoning_content_when_valid_json(self):
         """content が空で reasoning_content に有効な JSON が含まれる場合、フォールバックを採用する"""
         client = LMClient()
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": '思考中…\n{"action": "heal"}',
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        api_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": '思考中…\n{"action": "heal"}',
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, _ = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user")
-
+            content, tools = await client.generate_response("sys", "user")
         assert content == '{"action": "heal"}'
 
-    def test_no_fallback_when_reasoning_content_is_thinking_text(self):
+    async def test_no_fallback_when_reasoning_content_is_thinking_text(self):
         """reasoning_content が思考テキストのみで有効な JSON でない場合、空文字を返す（no_think=False でリトライなし）"""
         client = LMClient()
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": 'Thinking: Step 1 analyze {"partial": thinking...} more text',
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        api_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": 'Thinking: Step 1 analyze {"partial": thinking...} more text',
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, _ = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            # no_think=False なのでリトライは発生しない
-            content, tools = client.generate_response("sys", "user", no_think=False)
-
+            content, tools = await client.generate_response("sys", "user", no_think=False)
         assert content == ""
 
-    def test_fallback_to_reasoning_when_finish_reason_length(self):
+    async def test_fallback_to_reasoning_when_finish_reason_length(self):
         """finish_reason=length でも reasoning_content 内に完結した JSON があれば抽出する"""
         client = LMClient()
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "length",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": 'Thinking: {"action": "heal", "target": "ally"} more thinking...',
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        api_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "",
+                    "reasoning_content": 'Thinking: {"action": "heal", "target": "ally"} more thinking...',
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, _ = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user")
-
+            content, tools = await client.generate_response("sys", "user")
         assert content == '{"action": "heal", "target": "ally"}'
 
-    def test_retries_with_doubled_max_tokens_when_no_think_ignored(self):
+    async def test_retries_with_doubled_max_tokens_when_no_think_ignored(self):
         """no_think=True でモデルが思考を無視した場合、max_tokens を倍にしてリトライする"""
         client = LMClient()
-
-        # 1回目: content 空 + reasoning_content に思考テキスト（JSON 検証不合格）
-        first_resp = MagicMock()
-        first_resp.status_code = 200
-        first_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": "Thinking about the problem...",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-        # 2回目: リトライ成功（倍の max_tokens で content が返る）
-        retry_resp = MagicMock()
-        retry_resp.status_code = 200
-        retry_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": '{"result": "success"}',
-                        "reasoning_content": "Now I have enough tokens...",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        first_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "Thinking about the problem...",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        retry_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": '{"result": "success"}',
+                    "reasoning_content": "Now I have enough tokens...",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, mock_client = _patch_httpx_post(first_resp, retry_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch(
-                "core.lm_client.requests.post", side_effect=[first_resp, retry_resp]
-            ) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user", max_tokens=4096, no_think=True)
-
+            content, tools = await client.generate_response(
+                "sys", "user", max_tokens=4096, no_think=True
+            )
         assert content == '{"result": "success"}'
-        # 2回呼ばれたことを確認
-        assert mock_post.call_count == 2
-        # 2回目の max_tokens が倍になっていることを確認
-        retry_payload = mock_post.call_args_list[1][1]["json"]
+        assert mock_client.post.call_count == 2
+        retry_payload = mock_client.post.call_args_list[1][1]["json"]
         assert retry_payload["max_tokens"] == 8192
-        # リトライで思考抑制が追加されていることを確認
         assert retry_payload.get("chat_template_kwargs") == {"enable_thinking": False}
         assert retry_payload["messages"][0]["content"].startswith("/no_think")
 
-    def test_no_retry_when_no_think_is_false_and_finish_reason_stop(self):
+    async def test_no_retry_when_no_think_is_false_and_finish_reason_stop(self):
         """no_think=False かつ finish_reason=stop の場合、思考が無視されてもリトライしない"""
         client = LMClient()
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": "Thinking...",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        api_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "Thinking...",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, mock_client = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user", no_think=False)
-
+            content, tools = await client.generate_response("sys", "user", no_think=False)
         assert content == ""
-        assert mock_post.call_count == 1  # リトライなし
+        assert mock_client.post.call_count == 1
 
-    def test_retries_on_finish_reason_length_without_no_think(self):
+    async def test_retries_on_finish_reason_length_without_no_think(self):
         """no_think=False でも finish_reason=length で content 空なら max_tokens×2 でリトライする"""
         client = LMClient()
-
-        # 1回目: finish_reason=length, content 空
-        first_resp = MagicMock()
-        first_resp.status_code = 200
-        first_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "length",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": "長い思考テキスト...",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-        # 2回目: リトライ成功
-        retry_resp = MagicMock()
-        retry_resp.status_code = 200
-        retry_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": '{"name": "リトライ成功"}',
-                        "reasoning_content": "",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        first_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "長い思考テキスト...",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        retry_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": '{"name": "リトライ成功"}',
+                    "reasoning_content": "",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, mock_client = _patch_httpx_post(first_resp, retry_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch(
-                "core.lm_client.requests.post", side_effect=[first_resp, retry_resp]
-            ) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response(
+            content, tools = await client.generate_response(
                 "sys", "user", max_tokens=8192, no_think=False
             )
-
         assert content == '{"name": "リトライ成功"}'
-        assert mock_post.call_count == 2
-        retry_payload = mock_post.call_args_list[1][1]["json"]
+        assert mock_client.post.call_count == 2
+        retry_payload = mock_client.post.call_args_list[1][1]["json"]
         assert retry_payload["max_tokens"] == 16384
-        # no_think=False でもリトライ時は思考抑制が追加される
         assert retry_payload.get("chat_template_kwargs") == {"enable_thinking": False}
         assert retry_payload["messages"][0]["content"].startswith("/no_think")
 
-    def test_final_retry_on_finish_reason_length_without_no_think(self):
+    async def test_final_retry_on_finish_reason_length_without_no_think(self):
         """no_think=False でも finish_reason=length が連続すれば最終リトライ（×4）する"""
         client = LMClient()
-
-        empty_resp = MagicMock()
-        empty_resp.status_code = 200
-        empty_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "length",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": "思考のみ...",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
-        final_resp = MagicMock()
-        final_resp.status_code = 200
-        final_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": '{"name": "最終リトライ成功"}',
-                        "reasoning_content": "",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        empty_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "思考のみ...",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        final_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": '{"name": "最終リトライ成功"}',
+                    "reasoning_content": "",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, mock_client = _patch_httpx_post(empty_resp, empty_resp, final_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch(
-                "core.lm_client.requests.post",
-                side_effect=[empty_resp, empty_resp, final_resp],
-            ) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, _ = client.generate_response(
+            content, _ = await client.generate_response(
                 "sys", "user", max_tokens=8192, no_think=False, temperature=0.7
             )
-
-        assert mock_post.call_count == 3
+        assert mock_client.post.call_count == 3
         assert "最終リトライ成功" in content
-        final_payload = mock_post.call_args_list[2][1]["json"]
+        final_payload = mock_client.post.call_args_list[2][1]["json"]
         assert final_payload["max_tokens"] == 8192 * 4
         assert abs(final_payload["temperature"] - 0.8) < 1e-9
-        # 最終リトライでも思考抑制が適用されている
         assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
         assert final_payload["messages"][0]["content"].startswith("/no_think")
 
-    def test_retry_returns_tool_calls_from_retry_response(self):
+    async def test_retry_returns_tool_calls_from_retry_response(self):
         """リトライ成功時、tool_calls は初回レスポンスではなくリトライレスポンスから取得する"""
         client = LMClient()
-
-        # 1回目: content 空 + reasoning あり → リトライ発動
-        first_resp = MagicMock()
-        first_resp.status_code = 200
-        first_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": "Thinking...",
-                        "tool_calls": [{"id": "old", "function": {"name": "stale"}}],
-                    },
-                }
-            ]
-        }
-        # 2回目: リトライ成功 + 新しい tool_calls
-        retry_resp = MagicMock()
-        retry_resp.status_code = 200
-        retry_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": '{"ok": true}',
-                        "reasoning_content": "",
-                        "tool_calls": [{"id": "new", "function": {"name": "fresh"}}],
-                    },
-                }
-            ]
-        }
-
+        first_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "Thinking...",
+                    "tool_calls": [{"id": "old", "function": {"name": "stale"}}],
+                },
+            }]
+        })
+        retry_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": '{"ok": true}',
+                    "reasoning_content": "",
+                    "tool_calls": [{"id": "new", "function": {"name": "fresh"}}],
+                },
+            }]
+        })
+        patch_ctx, _ = _patch_httpx_post(first_resp, retry_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch(
-                "core.lm_client.requests.post", side_effect=[first_resp, retry_resp]
-            ),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user", no_think=True)
-
+            content, tools = await client.generate_response("sys", "user", no_think=True)
         assert tools is not None
         assert tools[0]["id"] == "new"
         assert tools[0]["function"]["name"] == "fresh"
 
-    def test_empty_tool_calls_list_normalized_to_none(self):
+    async def test_empty_tool_calls_list_normalized_to_none(self):
         """tool_calls が空リスト [] の場合、None に正規化する"""
         client = LMClient()
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": '{"action": "wait"}',
-                        "tool_calls": [],
-                    }
+        api_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "message": {
+                    "content": '{"action": "wait"}',
+                    "tool_calls": [],
                 }
-            ]
-        }
-
+            }]
+        })
+        patch_ctx, _ = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_response("sys", "user")
-
+            content, tools = await client.generate_response("sys", "user")
         assert tools is None
 
-    def test_custom_base_url_and_model(self):
+    async def test_custom_base_url_and_model(self):
         client = LMClient(base_url="http://myserver:5678", model="my-model")
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = self._make_api_response('{"x": 1}')
-
+        api_resp = _make_httpx_resp(200, _make_api_response('{"x": 1}'))
+        patch_ctx, mock_client = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            client.generate_response("sys", "user")
-
-        url = mock_post.call_args[0][0]
+            await client.generate_response("sys", "user")
+        url = mock_client.post.call_args[0][0]
         assert "myserver:5678" in url
-        payload = mock_post.call_args[1]["json"]
+        payload = mock_client.post.call_args[1]["json"]
         assert payload["model"] == "my-model"
 
-    def test_extracts_json_from_reasoning_with_thinking_text(self):
+    async def test_extracts_json_from_reasoning_with_thinking_text(self):
         """reasoning_content に思考テキストとJSONが混在する場合、JSONを抽出する"""
         client = LMClient()
         embedded_json = '{"name": "テスト太郎", "body": 4, "soul": 3}'
-        api_resp = MagicMock()
-        api_resp.status_code = 200
-        api_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": f"まずキャラを考えます…\n{embedded_json}\nこれで完成です。",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        api_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": f"まずキャラを考えます…\n{embedded_json}\nこれで完成です。",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, _ = _patch_httpx_post(api_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=api_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, _ = client.generate_response("sys", "user", no_think=False)
-
+            content, _ = await client.generate_response("sys", "user", no_think=False)
         assert '"name"' in content
         assert "テスト太郎" in content
 
-    def test_final_retry_suppresses_thinking_and_increases_tokens(self):
+    async def test_final_retry_suppresses_thinking_and_increases_tokens(self):
         """2回リトライしても空の場合、思考抑制を維持してmax_tokens×4で最終リトライする"""
         client = LMClient()
-        empty_resp = MagicMock()
-        empty_resp.status_code = 200
-        empty_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": "ただの思考テキスト",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
-        final_resp = MagicMock()
-        final_resp.status_code = 200
-        final_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": 'キャラを作ります。{"name": "最終太郎", "hp": 4}。以上。',
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        empty_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "ただの思考テキスト",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        final_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": 'キャラを作ります。{"name": "最終太郎", "hp": 4}。以上。',
+                    "tool_calls": None,
+                },
+            }]
+        })
+        patch_ctx, mock_client = _patch_httpx_post(empty_resp, empty_resp, final_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch(
-                "core.lm_client.requests.post",
-                side_effect=[empty_resp, empty_resp, final_resp],
-            ) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, _ = client.generate_response(
+            content, _ = await client.generate_response(
                 "sys", "user", no_think=True, max_tokens=4096, temperature=0.1
             )
-
-        assert mock_post.call_count == 3
-        final_payload = mock_post.call_args_list[2][1]["json"]
-        # 思考抑制が適用されている
+        assert mock_client.post.call_count == 3
+        final_payload = mock_client.post.call_args_list[2][1]["json"]
         assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
-        # /no_think プレフィックスが適用されている
         assert final_payload["messages"][0]["content"].startswith("/no_think")
-        # max_tokens が ×4 に拡大されている
         assert final_payload["max_tokens"] == 4096 * 4
-        # temperature が +0.1 されている
         assert final_payload["temperature"] == 0.2
         assert "最終太郎" in content
 
-    def test_final_retry_caps_temperature_at_1(self):
+    async def test_final_retry_caps_temperature_at_1(self):
         """最終リトライの temperature は 1.0 を超えない"""
         client = LMClient()
-        empty_resp = MagicMock()
-        empty_resp.status_code = 200
-        empty_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": "",
-                        "reasoning_content": "思考のみ",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
-        final_resp = MagicMock()
-        final_resp.status_code = 200
-        final_resp.json.return_value = {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": '{"ok": true}',
-                        "reasoning_content": "",
-                        "tool_calls": None,
-                    },
-                }
-            ]
-        }
-
+        empty_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "思考のみ",
+                    "tool_calls": None,
+                },
+            }]
+        })
+        final_resp = _make_httpx_resp(200, _make_api_response('{"ok": true}'))
+        patch_ctx, mock_client = _patch_httpx_post(empty_resp, empty_resp, final_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch(
-                "core.lm_client.requests.post",
-                side_effect=[empty_resp, empty_resp, final_resp],
-            ) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            client.generate_response("sys", "user", no_think=True, max_tokens=300, temperature=0.95)
-
-        final_payload = mock_post.call_args_list[2][1]["json"]
+            await client.generate_response(
+                "sys", "user", no_think=True, max_tokens=300, temperature=0.95
+            )
+        final_payload = mock_client.post.call_args_list[2][1]["json"]
         assert final_payload["temperature"] == 1.0
-        # 思考抑制が適用されている
         assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
 
 
@@ -659,43 +578,40 @@ class TestGenerateResponse:
 
 
 class TestGenerateWithTools:
-    def test_returns_none_when_server_not_running(self):
+    async def test_returns_none_when_server_not_running(self):
         client = LMClient()
-        with patch.object(client, "is_server_running", return_value=False):
-            content, tools = client.generate_with_tools(
+        with patch.object(client, "is_server_running", new=AsyncMock(return_value=False)):
+            content, tools = await client.generate_with_tools(
                 [{"role": "user", "content": "hello"}],
                 [],
             )
         assert content is None
         assert tools is None
 
-    def test_returns_content_and_tool_calls(self):
+    async def test_returns_content_and_tool_calls(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": "考えています",
-                        "tool_calls": [
-                            {
-                                "id": "call_1",
-                                "function": {
-                                    "name": "post_chat",
-                                    "arguments": '{"text": "こんにちは"}',
-                                },
-                            }
-                        ],
-                    }
+        mock_resp = _make_httpx_resp(200, {
+            "choices": [{
+                "message": {
+                    "content": "考えています",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": {
+                                "name": "post_chat",
+                                "arguments": '{"text": "こんにちは"}',
+                            },
+                        }
+                    ],
                 }
-            ]
-        }
+            }]
+        })
+        patch_ctx, _ = _patch_httpx_post(mock_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=mock_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tool_calls = client.generate_with_tools(
+            content, tool_calls = await client.generate_with_tools(
                 [{"role": "user", "content": "test"}],
                 [{"type": "function", "function": {"name": "post_chat"}}],
             )
@@ -704,72 +620,68 @@ class TestGenerateWithTools:
         assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "post_chat"
 
-    def test_returns_content_only_when_no_tool_calls(self):
+    async def test_returns_content_only_when_no_tool_calls(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
+        mock_resp = _make_httpx_resp(200, {
             "choices": [{"message": {"content": "plain text response"}}]
-        }
+        })
+        patch_ctx, _ = _patch_httpx_post(mock_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=mock_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tool_calls = client.generate_with_tools(
+            content, tool_calls = await client.generate_with_tools(
                 [{"role": "user", "content": "test"}], []
             )
         assert content == "plain text response"
         assert tool_calls is None
 
-    def test_strips_think_tags_from_content(self):
+    async def test_strips_think_tags_from_content(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
+        mock_resp = _make_httpx_resp(200, {
             "choices": [
                 {"message": {"content": "<think>考え中</think>結果のテキスト"}}
             ]
-        }
+        })
+        patch_ctx, _ = _patch_httpx_post(mock_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=mock_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, _ = client.generate_with_tools(
+            content, _ = await client.generate_with_tools(
                 [{"role": "user", "content": "test"}], []
             )
         assert content == "結果のテキスト"
 
-    def test_includes_tools_in_payload(self):
+    async def test_includes_tools_in_payload(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
+        mock_resp = _make_httpx_resp(200, {
             "choices": [{"message": {"content": "ok"}}]
-        }
+        })
         tools = [{"type": "function", "function": {"name": "test_tool"}}]
+        patch_ctx, mock_client = _patch_httpx_post(mock_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=mock_resp) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            client.generate_with_tools(
+            await client.generate_with_tools(
                 [{"role": "user", "content": "test"}], tools
             )
-        payload = mock_post.call_args[1]["json"]
+        payload = mock_client.post.call_args[1]["json"]
         assert payload["tools"] == tools
         assert payload["tool_choice"] == "auto"
 
-    def test_adds_image_to_last_user_message(self):
+    async def test_adds_image_to_last_user_message(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
+        mock_resp = _make_httpx_resp(200, {
             "choices": [{"message": {"content": "I see an image"}}]
-        }
+        })
+        patch_ctx, mock_client = _patch_httpx_post(mock_resp)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=mock_resp) as mock_post,
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            client.generate_with_tools(
+            await client.generate_with_tools(
                 [
                     {"role": "system", "content": "system"},
                     {"role": "user", "content": "describe this"},
@@ -777,33 +689,37 @@ class TestGenerateWithTools:
                 [],
                 image_base64="iVBORw0KGgo=",
             )
-        payload = mock_post.call_args[1]["json"]
+        payload = mock_client.post.call_args[1]["json"]
         user_msg = payload["messages"][1]
         assert isinstance(user_msg["content"], list)
         assert user_msg["content"][0]["type"] == "text"
         assert user_msg["content"][1]["type"] == "image_url"
 
-    def test_handles_api_error(self):
+    async def test_handles_api_error(self):
         client = LMClient()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=Exception("timeout"))
+        mock_instance = MagicMock()
+        mock_instance.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_instance.__aexit__ = AsyncMock(return_value=False)
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", side_effect=Exception("timeout")),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch("core.lm_client.httpx.AsyncClient", return_value=mock_instance),
         ):
-            content, tools = client.generate_with_tools(
+            content, tools = await client.generate_with_tools(
                 [{"role": "user", "content": "test"}], []
             )
         assert content is None
         assert tools is None
 
-    def test_handles_non_200_status(self):
+    async def test_handles_non_200_status(self):
         client = LMClient()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
+        patch_ctx, _ = _patch_httpx_post(_make_httpx_resp(500))
         with (
-            patch.object(client, "is_server_running", return_value=True),
-            patch("core.lm_client.requests.post", return_value=mock_resp),
+            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
+            patch_ctx,
         ):
-            content, tools = client.generate_with_tools(
+            content, tools = await client.generate_with_tools(
                 [{"role": "user", "content": "test"}], []
             )
         assert content is None

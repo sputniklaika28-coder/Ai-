@@ -53,7 +53,7 @@ _BOARD_STATE_JS = """() => {
 }"""
 
 
-def get_board_state_from_page(page: object) -> list[dict]:
+async def get_board_state_from_page(page: object) -> list[dict]:
     """Playwright Page から全駒の位置情報を取得する。
 
     Args:
@@ -62,7 +62,7 @@ def get_board_state_from_page(page: object) -> list[dict]:
     Returns:
         駒情報のリスト。
     """
-    raw = page.evaluate(_BOARD_STATE_JS)  # type: ignore[union-attr]
+    raw = await page.evaluate(_BOARD_STATE_JS)  # type: ignore[union-attr]
     result: list[dict] = []
     for p in raw:
         px_x, px_y = parse_xy(p["transform"])
@@ -78,7 +78,7 @@ def get_board_state_from_page(page: object) -> list[dict]:
     return result
 
 
-def spawn_piece_clipboard(page: object, character_json: dict) -> bool:
+async def spawn_piece_clipboard(page: object, character_json: dict) -> bool:
     """キャラクターJSONをクリップボード経由でCCFoliaにペーストして配置する。
 
     Args:
@@ -90,14 +90,14 @@ def spawn_piece_clipboard(page: object, character_json: dict) -> bool:
     """
     try:
         json_text = json.dumps(character_json, ensure_ascii=False)
-        page.evaluate("(text) => navigator.clipboard.writeText(text)", json_text)  # type: ignore[union-attr]
-        page.keyboard.press("Escape")  # type: ignore[union-attr]
-        page.wait_for_timeout(200)  # type: ignore[union-attr]
-        body = page.query_selector("body")  # type: ignore[union-attr]
+        await page.evaluate("(text) => navigator.clipboard.writeText(text)", json_text)  # type: ignore[union-attr]
+        await page.keyboard.press("Escape")  # type: ignore[union-attr]
+        await page.wait_for_timeout(200)  # type: ignore[union-attr]
+        body = await page.query_selector("body")  # type: ignore[union-attr]
         if body:
-            body.click()
-        page.keyboard.press("Control+v")  # type: ignore[union-attr]
-        page.wait_for_timeout(500)  # type: ignore[union-attr]
+            await body.click()
+        await page.keyboard.press("Control+v")  # type: ignore[union-attr]
+        await page.wait_for_timeout(500)  # type: ignore[union-attr]
         logger.info("駒を配置しました")
         return True
     except Exception as e:
