@@ -190,7 +190,7 @@ class TestGenerateResponse:
         ):
             await client.generate_response("sys", "user", no_think=True)
         payload = mock_client.post.call_args[1]["json"]
-        assert payload["messages"][0]["content"].startswith("/no_think")
+        assert payload["messages"][0]["content"] == "sys"
         assert payload.get("chat_template_kwargs") == {"enable_thinking": False}
 
     async def test_returns_none_on_non_200(self):
@@ -281,11 +281,11 @@ class TestGenerateResponse:
         assert content == '{"action": "heal", "target": "ally"}'
 
     async def test_retries_with_doubled_max_tokens_when_no_think_ignored(self):
-        """no_think=True でモデルが思考を無視した場合、max_tokens を倍にしてリトライする"""
+        """finish_reason=length で content が空の場合、max_tokens を倍にしてリトライする"""
         client = LMClient()
         first_resp = _make_httpx_resp(200, {
             "choices": [{
-                "finish_reason": "stop",
+                "finish_reason": "length",
                 "message": {
                     "content": "",
                     "reasoning_content": "Thinking about the problem...",
@@ -316,7 +316,7 @@ class TestGenerateResponse:
         retry_payload = mock_client.post.call_args_list[1][1]["json"]
         assert retry_payload["max_tokens"] == 8192
         assert retry_payload.get("chat_template_kwargs") == {"enable_thinking": False}
-        assert retry_payload["messages"][0]["content"].startswith("/no_think")
+        assert retry_payload["messages"][0]["content"] == "sys"
 
     async def test_no_retry_when_no_think_is_false_and_finish_reason_stop(self):
         """no_think=False かつ finish_reason=stop の場合、思考が無視されてもリトライしない"""
@@ -375,54 +375,15 @@ class TestGenerateResponse:
         assert mock_client.post.call_count == 2
         retry_payload = mock_client.post.call_args_list[1][1]["json"]
         assert retry_payload["max_tokens"] == 16384
-        assert retry_payload.get("chat_template_kwargs") == {"enable_thinking": False}
-        assert retry_payload["messages"][0]["content"].startswith("/no_think")
-
-    async def test_final_retry_on_finish_reason_length_without_no_think(self):
-        """no_think=False でも finish_reason=length が連続すれば最終リトライ（×4）する"""
-        client = LMClient()
-        empty_resp = _make_httpx_resp(200, {
-            "choices": [{
-                "finish_reason": "length",
-                "message": {
-                    "content": "",
-                    "reasoning_content": "思考のみ...",
-                    "tool_calls": None,
-                },
-            }]
-        })
-        final_resp = _make_httpx_resp(200, {
-            "choices": [{
-                "finish_reason": "stop",
-                "message": {
-                    "content": '{"name": "最終リトライ成功"}',
-                    "reasoning_content": "",
-                    "tool_calls": None,
-                },
-            }]
-        })
-        patch_ctx, mock_client = _patch_httpx_post(empty_resp, empty_resp, final_resp)
-        with (
-            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
-            patch_ctx,
-        ):
-            content, _ = await client.generate_response(
-                "sys", "user", max_tokens=8192, no_think=False, temperature=0.7
-            )
-        assert mock_client.post.call_count == 3
-        assert "最終リトライ成功" in content
-        final_payload = mock_client.post.call_args_list[2][1]["json"]
-        assert final_payload["max_tokens"] == 8192 * 4
-        assert abs(final_payload["temperature"] - 0.8) < 1e-9
-        assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
-        assert final_payload["messages"][0]["content"].startswith("/no_think")
+        assert retry_payload.get("chat_template_kwargs") is None
+        assert retry_payload["messages"][0]["content"] == "sys"
 
     async def test_retry_returns_tool_calls_from_retry_response(self):
         """リトライ成功時、tool_calls は初回レスポンスではなくリトライレスポンスから取得する"""
         client = LMClient()
         first_resp = _make_httpx_resp(200, {
             "choices": [{
-                "finish_reason": "stop",
+                "finish_reason": "length",
                 "message": {
                     "content": "",
                     "reasoning_content": "Thinking...",
@@ -505,71 +466,6 @@ class TestGenerateResponse:
             content, _ = await client.generate_response("sys", "user", no_think=False)
         assert '"name"' in content
         assert "テスト太郎" in content
-
-    async def test_final_retry_suppresses_thinking_and_increases_tokens(self):
-        """2回リトライしても空の場合、思考抑制を維持してmax_tokens×4で最終リトライする"""
-        client = LMClient()
-        empty_resp = _make_httpx_resp(200, {
-            "choices": [{
-                "finish_reason": "stop",
-                "message": {
-                    "content": "",
-                    "reasoning_content": "ただの思考テキスト",
-                    "tool_calls": None,
-                },
-            }]
-        })
-        final_resp = _make_httpx_resp(200, {
-            "choices": [{
-                "finish_reason": "stop",
-                "message": {
-                    "content": "",
-                    "reasoning_content": 'キャラを作ります。{"name": "最終太郎", "hp": 4}。以上。',
-                    "tool_calls": None,
-                },
-            }]
-        })
-        patch_ctx, mock_client = _patch_httpx_post(empty_resp, empty_resp, final_resp)
-        with (
-            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
-            patch_ctx,
-        ):
-            content, _ = await client.generate_response(
-                "sys", "user", no_think=True, max_tokens=4096, temperature=0.1
-            )
-        assert mock_client.post.call_count == 3
-        final_payload = mock_client.post.call_args_list[2][1]["json"]
-        assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
-        assert final_payload["messages"][0]["content"].startswith("/no_think")
-        assert final_payload["max_tokens"] == 4096 * 4
-        assert final_payload["temperature"] == 0.2
-        assert "最終太郎" in content
-
-    async def test_final_retry_caps_temperature_at_1(self):
-        """最終リトライの temperature は 1.0 を超えない"""
-        client = LMClient()
-        empty_resp = _make_httpx_resp(200, {
-            "choices": [{
-                "finish_reason": "stop",
-                "message": {
-                    "content": "",
-                    "reasoning_content": "思考のみ",
-                    "tool_calls": None,
-                },
-            }]
-        })
-        final_resp = _make_httpx_resp(200, _make_api_response('{"ok": true}'))
-        patch_ctx, mock_client = _patch_httpx_post(empty_resp, empty_resp, final_resp)
-        with (
-            patch.object(client, "is_server_running", new=AsyncMock(return_value=True)),
-            patch_ctx,
-        ):
-            await client.generate_response(
-                "sys", "user", no_think=True, max_tokens=300, temperature=0.95
-            )
-        final_payload = mock_client.post.call_args_list[2][1]["json"]
-        assert final_payload["temperature"] == 1.0
-        assert final_payload.get("chat_template_kwargs") == {"enable_thinking": False}
 
 
 # ──────────────────────────────────────────
