@@ -21,12 +21,17 @@ class LMClient:
         except Exception:
             return False
 
+    def _strip_think_tags(self, text: str) -> str:
+        """<think>...</think> タグを除去して後続テキストを返す。"""
+        if "</think>" in text:
+            text = text.split("</think>")[-1].strip()
+        return text
+
     def _clean_response(self, text: str) -> str:
         """AIの余計な独り言や思考プロセスを完全に削ぎ落とし、純粋なJSONだけを抽出する"""
 
         # 1. もし <think> タグが含まれていたら、その後ろだけを切り出す
-        if "</think>" in text:
-            text = text.split("</think>")[-1]
+        text = self._strip_think_tags(text)
 
         # 2. 「思考プロセス：」などの日本語の独り言が含まれていた場合、
         #    最初の `{` が出現するまでの文字をすべてゴミとして切り捨てる
@@ -132,15 +137,8 @@ class LMClient:
         if not await self.is_server_running():
             return None, None
 
-        # Qwen3系などの思考モデルで思考を抑制する
-        # chat_template_kwargs でllama.cpp/LM Studioに指示し、
-        # システムプロンプト先頭の /no_think でモデルにも直接指示する
-        effective_system = system_prompt
-        if no_think:
-            effective_system = "/no_think\n" + system_prompt
-
         messages = [
-            {"role": "system", "content": effective_system},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
 
@@ -170,38 +168,24 @@ class LMClient:
                 )
             if response.status_code == 200:
                 result = response.json()
-                raw_content, thinking_ignored, finish_reason, content_was_empty = (
+                raw_content, _, finish_reason, content_was_empty = (
                     self._extract_content(result)
                 )
-                # tool_calls はリトライで更新される可能性があるため、最新のレスポンスを追跡する
                 active_result = result
 
-                # reasoning_content から有効な JSON を抽出済みなら
-                # content は補完されているのでリトライ不要
+                # reasoning_content から有効な JSON を抽出済みならリトライ不要
                 json_recovered = content_was_empty and bool(raw_content.strip())
 
-                # リトライ判定:
-                # 1. no_think が無視されて content が空（思考トークンで消費しきった）
-                # 2. finish_reason=length で元の content が空（トークン上限到達）
-                # ただし reasoning から JSON 抽出に成功した場合はスキップ
+                # リトライ判定: finish_reason=length で content が空の場合のみ
                 needs_retry = not json_recovered and (
-                    (thinking_ignored and no_think)
-                    or (finish_reason == "length" and content_was_empty)
+                    finish_reason == "length" and content_was_empty
                 )
 
                 if needs_retry:
-                    # 思考トークンが全バジェットを消費している可能性が高いため、
-                    # リトライでは思考を明示的に抑制してコンテンツ生成に集中させる
-                    print("DEBUG: content空検出 → 思考抑制+max_tokens×2でリトライ")
-                    retry_messages = [
-                        {"role": "system", "content": "/no_think\n" + system_prompt},
-                        {"role": "user", "content": user_message},
-                    ]
+                    print("DEBUG: content空(length) → max_tokens×2でリトライ")
                     retry_payload = {
                         **payload,
-                        "messages": retry_messages,
                         "max_tokens": max_tokens * 2,
-                        "chat_template_kwargs": {"enable_thinking": False},
                     }
                     async with httpx.AsyncClient(timeout=timeout) as client:
                         retry_resp = await client.post(
@@ -211,41 +195,8 @@ class LMClient:
                     if retry_resp.status_code == 200:
                         retry_result = retry_resp.json()
                         active_result = retry_result
-                        raw_content, still_ignored, retry_finish, retry_empty = (
-                            self._extract_content(retry_result)
-                        )
+                        raw_content, _, _, _ = self._extract_content(retry_result)
 
-                        # それでもダメなら最終リトライ
-                        # ・max_tokens を ×4 に拡大（思考+出力の両方に十分な余裕）
-                        # ・temperature を微増して決定論的な失敗ループを回避
-                        # ・思考抑制を維持してコンテンツ出力を最優先
-                        still_needs_retry = still_ignored or (
-                            retry_finish == "length" and retry_empty
-                        )
-                        if still_needs_retry:
-                            print("DEBUG: リトライも空 → 思考抑制+max_tokens×4で最終リトライ")
-                            final_messages = [
-                                {"role": "system", "content": "/no_think\n" + system_prompt},
-                                {"role": "user", "content": user_message},
-                            ]
-                            final_payload = {
-                                **payload,
-                                "messages": final_messages,
-                                "max_tokens": max_tokens * 4,
-                                "temperature": min(temperature + 0.1, 1.0),
-                                "chat_template_kwargs": {"enable_thinking": False},
-                            }
-                            async with httpx.AsyncClient(timeout=timeout) as client:
-                                final_resp = await client.post(
-                                    f"{self.base_url}/v1/chat/completions",
-                                    json=final_payload,
-                                )
-                            if final_resp.status_code == 200:
-                                final_result = final_resp.json()
-                                active_result = final_result
-                                raw_content, _, _, _ = self._extract_content(final_result)
-
-                # ログを見ると、AIがJSONの中にさらに思考を書き込んでいる場合があるため、クリーン処理にかける
                 content = self._clean_response(raw_content)
                 tool_calls = active_result["choices"][0]["message"].get("tool_calls") or None
 
@@ -332,8 +283,7 @@ class LMClient:
                 tool_calls = message.get("tool_calls") or None
 
                 # <think> タグがある場合はクリーンアップ
-                if content and "</think>" in content:
-                    content = content.split("</think>")[-1].strip()
+                content = self._strip_think_tags(content)
 
                 return content or None, tool_calls
             return None, None

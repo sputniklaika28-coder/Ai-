@@ -714,8 +714,7 @@ class CCFoliaConnector:
             res, _ = self._run_async(self.lm_client.generate_response(
                 system_prompt="あなたはGMアシスタントです。",
                 user_message="準備完了を一言で答えてください。",
-                max_tokens=50,
-                no_think=True,
+                max_tokens=128,
             ))
             reachable = bool(res)
         except Exception:
@@ -1072,8 +1071,7 @@ class CCFoliaConnector:
                             res, _ = self._run_async(self.lm_client.generate_response(
                                 system_prompt=sys_prompt,
                                 user_message=enriched,
-                                max_tokens=4096,
-                                no_think=True,
+                                max_tokens=8192,
                             ))
 
                             if res:
