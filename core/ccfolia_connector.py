@@ -712,9 +712,10 @@ class CCFoliaConnector:
         """LMクライアントの到達性を確認する。"""
         try:
             res, _ = self._run_async(self.lm_client.generate_response(
-                system_prompt="ping",
-                user_message="返事をしてください",
-                max_tokens=10,
+                system_prompt="あなたはGMアシスタントです。",
+                user_message="準備完了を一言で答えてください。",
+                max_tokens=50,
+                no_think=True,
             ))
             reachable = bool(res)
         except Exception:
@@ -1061,17 +1062,18 @@ class CCFoliaConnector:
                             self._run_agent_loop(target_char, "meta_gm", enriched)
                         else:
                             prompt_tmpl = self.pm.get_template(target_char.get("prompt_id"))
-                            sys_prompt = (
-                                f"{self.world_setting}\n\n"
-                                f"{prompt_tmpl.get('system', '') if prompt_tmpl else ''}\n"
-                                "※重要: 内部の思考プロセス（Thinking Process）は極力短く済ませ、"
-                                "プレイヤーへの返答テキストを直ちに出力してください。"
-                            )
+                            parts = []
+                            if self.world_setting.strip():
+                                parts.append(self.world_setting.strip())
+                            if prompt_tmpl and prompt_tmpl.get("system", "").strip():
+                                parts.append(prompt_tmpl["system"].strip())
+                            sys_prompt = "\n\n".join(parts)
 
                             res, _ = self._run_async(self.lm_client.generate_response(
                                 system_prompt=sys_prompt,
                                 user_message=enriched,
                                 max_tokens=4096,
+                                no_think=True,
                             ))
 
                             if res:
