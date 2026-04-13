@@ -21,5 +21,13 @@
   "set_room_name": "CCFoliaのルーム設定を開き、ルーム名を「{room_name}」に変更してください。\n手順: 1) ルーム設定を開く 2) ルーム名欄を見つけて変更 3) 保存",
   "set_room_description": "CCFoliaのルーム設定を開き、ルーム説明文を設定してください。\n説明文: {description}\n手順: 1) ルーム設定を開く 2) 説明欄に入力 3) 保存",
 
-  "scene_transition_narration": "シーンが「{scene_name}」に遷移します。\n以下の情景描写をCCFoliaのチャット欄にGMとして投稿してください:\n{narration}\n手順: 1) GM名義でチャット欄に入力 2) 送信"
+  "scene_transition_narration": "シーンが「{scene_name}」に遷移します。\n以下の情景描写をCCFoliaのチャット欄にGMとして投稿してください:\n{narration}\n手順: 1) GM名義でチャット欄に入力 2) 送信",
+
+  "os_find_element": "あなたはデスクトップアプリの画面画像を見ています。\n以下の説明に合致するUI要素（ボタン・入力欄・リンク等）の「中心座標」を特定してください。\n説明: {description}\n画像サイズ: {width}x{height}ピクセル。\n以下のJSON形式で回答してください。座標は画像内の絶対ピクセル位置です:\n{\"px_x\": 数値, \"px_y\": 数値}\n説明に合致する要素が見当たらない場合は {\"px_x\": -1, \"px_y\": -1} を返してください。",
+
+  "os_find_element_som": "あなたはデスクトップアプリの画面画像を見ています。画面上の候補クリック要素には番号札（1, 2, 3, ...）が重ねて表示されています。\n以下の説明に合致する要素の番号を1つだけ選んでください。\n説明: {description}\n以下のJSON形式で回答してください:\n{\"mark_id\": 番号}\n該当がなければ {\"mark_id\": -1} を返してください。",
+
+  "os_agent_plan_step": "あなたはユーザーのゴールを達成するためにデスクトップアプリを操作するAIエージェントです。\nユーザーのゴール: {goal}\n対象ウィンドウ: {window_title}\n現在の画面を見て、次に呼び出すべき内部ツールを1つだけ function_call で決定してください。\n利用可能な内部ツール: os_find_element, os_click_element, os_type_text, task_done\nゴールを達成したら task_done を呼んでください。\n画面が見えない／迷った場合は os_screenshot を呼ぶのではなく、直接 os_find_element または os_click_element を選択してください。",
+
+  "os_describe_screen": "あなたはデスクトップアプリの画面画像を見ています。\n現在の画面の状態を日本語で簡潔に（200文字以内で）説明してください。\n特に、入力フォーム・ボタン・メッセージダイアログなど操作可能な要素の有無を優先して記述してください。"
 }

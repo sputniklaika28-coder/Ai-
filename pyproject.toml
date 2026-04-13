@@ -29,6 +29,18 @@ browser-use = [
     "langchain-anthropic>=0.1",
     "python-dotenv>=1.0",
 ]
+vlm-agent = [
+    "mss>=9.0",
+    "pyautogui>=0.9.54",
+    "pyperclip>=1.8",
+    "pygetwindow>=0.0.9",
+    "pynput>=1.7",
+    "Pillow>=10",
+]
+vlm-agent-som = [
+    "opencv-python>=4.9",
+    "numpy>=1.26",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -63,6 +75,7 @@ markers = [
     "integration: marks tests that require a live LM Studio server",
     "browser_use: marks tests that require Browser Use + cloud API",
     "e2e: marks end-to-end tests that require full CCFolia + LLM + browser environment",
+    "vlm_agent: marks tests that require the [vlm-agent] optional extras",
 ]
 
 # ──────────────────────────────────────────

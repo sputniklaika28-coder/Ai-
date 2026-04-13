@@ -59,3 +59,72 @@ def load_config() -> dict[str, str]:
         "vlm_provider": os.getenv("VLM_PROVIDER", "local"),
         "vlm_model": os.getenv("VLM_MODEL", ""),
     }
+
+
+# ──────────────────────────────────────────
+# VLM OS Agent 用 env ゲッター
+# ──────────────────────────────────────────
+
+_VLM_AGENT_TRUE = {"1", "true", "yes", "on"}
+
+
+def _vlm_agent_env_loaded() -> None:
+    """.env が未ロードなら load_dotenv する（呼び出しは副作用のみ）。"""
+    if not os.environ.get("_VLM_AGENT_ENV_LOADED"):
+        _ensure_env_file()
+        load_dotenv(_ENV_PATH)
+        os.environ["_VLM_AGENT_ENV_LOADED"] = "1"
+
+
+def get_vlm_agent_target_window() -> str:
+    """対象ウィンドウのタイトル（正規表現）。既定 'ココフォリア'。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("VLM_AGENT_TARGET_WINDOW", "ココフォリア")
+
+
+def get_vlm_agent_poll_ms() -> int:
+    """エージェントループのポーリング間隔（ミリ秒）。既定 500。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(50, int(os.getenv("VLM_AGENT_POLL_MS", "500")))
+    except ValueError:
+        return 500
+
+
+def get_vlm_agent_cache_ttl() -> int:
+    """座標キャッシュ TTL（秒）。既定 3600。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(0, int(os.getenv("VLM_AGENT_CACHE_TTL", "3600")))
+    except ValueError:
+        return 3600
+
+
+def get_vlm_agent_som_enabled() -> bool:
+    """Set-of-Mark 番号札を有効化するか。既定 False。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("VLM_AGENT_SOM_ENABLED", "false").strip().lower() in _VLM_AGENT_TRUE
+
+
+def get_vlm_agent_max_steps() -> int:
+    """os_run_task の最大ステップ数。既定 20。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(1, int(os.getenv("VLM_AGENT_MAX_STEPS", "20")))
+    except ValueError:
+        return 20
+
+
+def get_vlm_agent_failsafe() -> bool:
+    """pyautogui の FAILSAFE（画面四隅緊急停止）を有効化するか。既定 True。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("VLM_AGENT_FAILSAFE", "true").strip().lower() in _VLM_AGENT_TRUE
+
+
+def get_vlm_agent_perceive_backend() -> str:
+    """Perceive バックエンド名: 'none' | 'cv' | 'omniparser'。既定 'none'。"""
+    _vlm_agent_env_loaded()
+    v = os.getenv("VLM_AGENT_PERCEIVE_BACKEND", "none").strip().lower()
+    if v not in {"none", "cv", "omniparser"}:
+        return "none"
+    return v
