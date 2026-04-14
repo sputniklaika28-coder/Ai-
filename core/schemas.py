@@ -437,3 +437,105 @@ class CombatActionResult(BaseModel):
         default=None,
         description="エラーメッセージ（解決失敗時のみ設定）",
     )
+
+
+# ══════════════════════════════════════
+# Phase 4: エンティティ追跡 & GMDirector
+# ══════════════════════════════════════
+
+
+# ──────────────────────────────────────
+# エンティティ記録
+# ──────────────────────────────────────
+
+
+class EntityRecord(BaseModel):
+    """セッション中に登場したエンティティ（NPC・アイテム・場所・クエストフラグ）。
+
+    EntityTracker が永続管理し、GMDirector がコンテキスト生成に利用する。
+    """
+
+    name: str = Field(description="エンティティ名（一意識別子として使用）")
+    entity_type: str = Field(
+        description="種別: 'npc' / 'item' / 'location' / 'quest_flag' / 'other'"
+    )
+    attributes: dict = Field(
+        default_factory=dict,
+        description="任意の属性辞書 (例: {'hp': 8, 'disposition': '敵対的'})",
+    )
+    notes: str = Field(
+        default="",
+        description="GM 用のメモ（背景・秘密・プロットフック等）",
+    )
+    active: bool = Field(
+        default=True,
+        description="現在アクティブか（倒された敵・回収済みアイテムは False）",
+    )
+
+
+class EntityExtractionResult(BaseModel):
+    """LLM がナレーションテキストから抽出したエンティティ一覧。
+
+    GMDirector が自動エンティティ登録に使用する。
+    """
+
+    entities: list[EntityRecord] = Field(
+        default_factory=list,
+        description="テキスト中に登場した新規または更新すべきエンティティのリスト",
+    )
+
+
+# ──────────────────────────────────────
+# セッションコンテキスト
+# ──────────────────────────────────────
+
+
+class SessionContext(BaseModel):
+    """GMDirector が LLM プロンプトに注入するセッション全体のコンテキスト。"""
+
+    game_state_summary: str = Field(
+        default="",
+        description="GameState.summary() の出力（HP・フェーズ・ターン等）",
+    )
+    entity_summary: str = Field(
+        default="",
+        description="EntityTracker.context_summary() の出力（NPC・アイテム・場所等）",
+    )
+    recent_events: list[str] = Field(
+        default_factory=list,
+        description="直近のセッションイベントリスト（ナレーションの継続性確保用）",
+    )
+    round_number: int = Field(default=0, description="現在のラウンド数")
+    phase: str = Field(default="exploration", description="現在のゲームフェーズ")
+
+
+# ──────────────────────────────────────
+# GM ターン結果
+# ──────────────────────────────────────
+
+
+class GMTurnResultSchema(BaseModel):
+    """GMDirector.process_turn() の最終出力スキーマ。"""
+
+    intention_type: str = Field(
+        default="",
+        description="解釈されたアクション種別 (attack / skill / dialogue 等)",
+    )
+    combat_resolved: bool = Field(
+        default=False,
+        description="CombatEngine による決定論的解決が行われたか",
+    )
+    narration: str = Field(description="GMナレーション本文")
+    vtt_chat_lines: list[str] = Field(
+        default_factory=list,
+        description="VTT チャットに投稿すべきテキストのリスト",
+    )
+    new_entity_names: list[str] = Field(
+        default_factory=list,
+        description="このターンで新規登録されたエンティティ名リスト",
+    )
+    error: str | None = Field(
+        default=None,
+        description="処理エラーメッセージ（正常時は None）",
+    )
+
