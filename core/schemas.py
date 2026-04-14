@@ -172,3 +172,134 @@ class VTTActionPlan(BaseModel):
     drag_to_y: int | None = Field(default=None, description="ドラッグ先 Y（drag 時のみ）")
     text_input: str | None = Field(default=None, description="入力テキスト（type 時のみ）")
     reason: str = Field(default="", description="この操作を選んだ理由")
+
+
+# ══════════════════════════════════════
+# Phase 2: ペルソナ自動構築 & ビジュアル生成
+# ══════════════════════════════════════
+
+
+# ──────────────────────────────────────
+# キャラクターコンセプト → シートJSON 変換
+# ──────────────────────────────────────
+
+
+class SkillEntry(BaseModel):
+    """TRPG スキル定義。"""
+
+    name: str = Field(description="スキル名")
+    cost: int = Field(default=0, description="SP コスト")
+    condition: str = Field(default="", description="発動条件")
+    effect: str = Field(description="効果説明")
+
+
+class InitialStats(BaseModel):
+    """初期能力値セット。ゲームシステムに合わせて調整する。"""
+
+    hp: int = Field(default=5, description="HP（生命力）")
+    sp: int = Field(default=3, description="SP（精神力）")
+    body: int = Field(default=3, description="体格（物理系）")
+    soul: int = Field(default=3, description="精神（魔法系）")
+    skill: int = Field(default=3, description="技術（器用さ）")
+    magic: int = Field(default=2, description="魔力")
+    mobility: int = Field(default=3, description="機動力")
+    armor: int = Field(default=0, description="装甲値")
+
+
+class CharacterConceptOutput(BaseModel):
+    """LLM がコンセプトテキストから生成するキャラクター定義。
+
+    PersonaBuilder.build_from_concept() の中間出力として使用。
+    """
+
+    name: str = Field(description="キャラクター名（漢字またはカタカナ推奨）")
+    archetype: str = Field(
+        description="役割アーキタイプ（例: 重戦士 / 回復役 / 斥候 / 魔法使い）"
+    )
+    background: str = Field(description="背景・出自・過去（2〜3文）")
+    personality: str = Field(description="性格・気質（2〜3文）")
+    speech_style: str = Field(
+        description="話し方・語尾・口癖（例: 「〜でごさる」「〜っす」「淡々と敬語」）"
+    )
+    motivation: str = Field(description="動機・目標・信念（1〜2文）")
+    forbidden_actions: list[str] = Field(
+        default_factory=list,
+        description="NG行動リスト（例: [\"他者を傷つける\", \"嘘をつく\"]）",
+    )
+    initial_stats: InitialStats = Field(
+        default_factory=InitialStats,
+        description="初期能力値（合計が均衡するよう調整すること）",
+    )
+    recommended_skills: list[SkillEntry] = Field(
+        default_factory=list,
+        description="推奨スキル（2〜4個）",
+    )
+    appearance: str = Field(
+        default="",
+        description="外見・服装（画像生成プロンプトの材料として使用）",
+    )
+    portrait_keywords: list[str] = Field(
+        default_factory=list,
+        description="立ち絵生成用英語キーワード（例: [\"young woman\", \"silver hair\", \"priestess robe\"]）",
+    )
+
+
+# ──────────────────────────────────────
+# ペルソナ定義（システムプロンプト生成出力）
+# ──────────────────────────────────────
+
+
+class PersonaDefinition(BaseModel):
+    """LLM が生成するキャラクターのペルソナ定義。
+
+    PersonaBuilder.build_from_concept() の最終出力として使用。
+    system_prompt をそのままLMClientに渡せる形式。
+    """
+
+    character_name: str = Field(description="キャラクター名")
+    system_prompt: str = Field(
+        description="LLM に渡すシステムプロンプト全文（日本語）"
+    )
+    speech_style_examples: list[str] = Field(
+        default_factory=list,
+        description="話し方サンプル（3〜5文）",
+    )
+    forbidden_topics: list[str] = Field(
+        default_factory=list,
+        description="応答してはいけないトピック・行動",
+    )
+    persona_summary: str = Field(
+        default="",
+        description="ペルソナの1行サマリー（GUI 表示用）",
+    )
+
+
+# ──────────────────────────────────────
+# 画像生成リクエスト / 結果
+# ──────────────────────────────────────
+
+
+class PortraitRequest(BaseModel):
+    """立ち絵・トークン生成リクエスト。"""
+
+    character_name: str = Field(description="キャラクター名")
+    portrait_keywords: list[str] = Field(
+        default_factory=list,
+        description="英語キーワード（外見・服装・雰囲気）",
+    )
+    style: str = Field(
+        default="anime_character",
+        description="生成スタイル（anime_character / fantasy_portrait / dark_gothic）",
+    )
+    remove_background: bool = Field(
+        default=True,
+        description="背景を透過にするか（VTT トークン用途では True 推奨）",
+    )
+    create_token: bool = Field(
+        default=True,
+        description="円形クロップのトークン画像も生成するか",
+    )
+    token_size: int = Field(
+        default=256,
+        description="トークン画像の一辺ピクセル数",
+    )

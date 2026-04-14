@@ -1,0 +1,18 @@
+{
+  "id": "portrait_generator",
+  "name": "立ち絵・トークン自動生成 (Phase 2)",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "キャラクターコンセプトから立ち絵・VTTトークンを自動生成。ペルソナ（システムプロンプト）の自動構築も行う。",
+  "author": "core",
+  "dependencies": ["image_generator"],
+  "entry_point": "addon.py",
+  "class_name": "PortraitGeneratorAddon",
+  "tools": [
+    "build_character_persona",
+    "generate_character_portrait",
+    "generate_npc_persona"
+  ],
+  "gui_tab": "gui_tab.py",
+  "gui_tab_label": "キャラ生成"
+}
