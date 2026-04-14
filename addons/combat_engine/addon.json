@@ -1,0 +1,23 @@
+{
+  "id": "combat_engine",
+  "name": "戦闘解決エンジン (Phase 3)",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "決定論的な戦闘解決・ダイスロール・ゲーム状態管理ツール群。HP追跡・状態異常・イニシアティブ・ラウンド進行を担当する。",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "CombatEngineAddon",
+  "tools": [
+    "roll_dice",
+    "get_game_state",
+    "register_combatant",
+    "apply_hp_change",
+    "add_condition",
+    "remove_condition",
+    "set_initiative",
+    "start_combat",
+    "advance_turn",
+    "end_combat"
+  ]
+}

@@ -303,3 +303,137 @@ class PortraitRequest(BaseModel):
         default=256,
         description="トークン画像の一辺ピクセル数",
     )
+
+
+# ══════════════════════════════════════
+# Phase 3: セッション状態管理 & 戦闘解決
+# ══════════════════════════════════════
+
+
+# ──────────────────────────────────────
+# ダイスロール
+# ──────────────────────────────────────
+
+
+class DiceRollRequest(BaseModel):
+    """LLM がダイスロールを要求する際の入力スキーマ。"""
+
+    notation: str = Field(
+        description="ダイス記法 (例: '2d6', '1d20+3', '3d6-1')"
+    )
+    difficulty: int | None = Field(
+        default=None,
+        description="難易度（設定した場合、合計値と比較して成否を判定）",
+    )
+    character_name: str = Field(
+        default="",
+        description="ロールを行うキャラクター名（ログ用）",
+    )
+    purpose: str = Field(
+        default="",
+        description="ロールの目的 (例: '命中判定', '回避判定', 'スキル使用')",
+    )
+
+
+class RollResultSchema(BaseModel):
+    """ダイスロール結果の構造化表現。LLM への返却値として使用。"""
+
+    notation: str = Field(description="使用したダイス記法")
+    dice: list[int] = Field(description="各ダイスの出目")
+    modifier: int = Field(default=0, description="修正値")
+    total: int = Field(description="合計値 (sum(dice) + modifier)")
+    difficulty: int | None = Field(default=None, description="難易度（設定した場合）")
+    success: bool | None = Field(
+        default=None,
+        description="成否（difficulty が設定された場合のみ有効）",
+    )
+    degree: str = Field(
+        default="",
+        description=(
+            "成否の程度: critical_success / great_success / success / "
+            "failure / great_failure / critical_failure"
+        ),
+    )
+    margin: int | None = Field(
+        default=None,
+        description="成功マージン (total - difficulty)",
+    )
+    narration: str = Field(
+        default="",
+        description="GMナレーションに挿入できるロール結果テキスト",
+    )
+
+
+# ──────────────────────────────────────
+# ゲーム状態スナップショット
+# ──────────────────────────────────────
+
+
+class CombatantSnapshot(BaseModel):
+    """戦闘参加者 1 名の状態スナップショット。"""
+
+    name: str = Field(description="キャラクター名")
+    hp: int = Field(description="現在 HP")
+    max_hp: int = Field(description="最大 HP")
+    sp: int = Field(default=0, description="現在 SP（精神力）")
+    max_sp: int = Field(default=0, description="最大 SP")
+    conditions: list[str] = Field(
+        default_factory=list,
+        description="状態異常リスト (例: ['出血', '気絶'])",
+    )
+    is_enemy: bool = Field(default=False, description="敵キャラクターか否か")
+    initiative: int = Field(default=0, description="イニシアティブ値")
+
+
+class GameStateSnapshot(BaseModel):
+    """セッション全体のゲーム状態スナップショット。"""
+
+    phase: str = Field(
+        description="現在フェーズ: 'exploration' | 'combat' | 'dialogue' | 'rest'"
+    )
+    round_number: int = Field(description="現在のラウンド数（戦闘フェーズ中のみ有効）")
+    current_actor: str | None = Field(
+        default=None,
+        description="現在のターンを持つキャラクター名",
+    )
+    combatants: list[CombatantSnapshot] = Field(
+        default_factory=list,
+        description="全参加者の状態リスト",
+    )
+    summary: str = Field(
+        default="",
+        description="GMプロンプトへ挿入できる状態サマリー文字列",
+    )
+
+
+# ──────────────────────────────────────
+# 戦闘アクション結果
+# ──────────────────────────────────────
+
+
+class CombatActionResult(BaseModel):
+    """戦闘アクション解決後の結果。CombatEngine → LLM への返却値。"""
+
+    actor: str = Field(description="行動したキャラクター名")
+    target: str | None = Field(default=None, description="対象キャラクター名")
+    action_type: str = Field(description="行動種別 (attack / skill / item / move / dialogue)")
+    roll: RollResultSchema | None = Field(default=None, description="ダイスロール結果（判定があった場合）")
+    success: bool = Field(description="アクションが成功したか")
+    damage_dealt: int = Field(default=0, description="与えたダメージ量")
+    hp_after: int | None = Field(default=None, description="対象の行動後 HP")
+    conditions_added: list[str] = Field(
+        default_factory=list,
+        description="このアクションで付与された状態異常",
+    )
+    conditions_removed: list[str] = Field(
+        default_factory=list,
+        description="このアクションで解除された状態異常",
+    )
+    narration_hint: str = Field(
+        default="",
+        description="GMナレーション生成のヒント（LLM への補助テキスト）",
+    )
+    error: str | None = Field(
+        default=None,
+        description="エラーメッセージ（解決失敗時のみ設定）",
+    )
