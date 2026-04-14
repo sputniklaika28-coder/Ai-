@@ -566,7 +566,62 @@ class CCFoliaConnector:
     # ──────────────────────────────────────────
 
     def _init_adapter(self) -> None:
-        """VTTアダプターを初期化してCCFoliaに接続する。"""
+        """VTTアダプターを初期化して VTT に接続する。
+
+        VTT_BACKEND 環境変数で接続方式を切り替える:
+          foundry  → Foundry VTT REST API（ブラウザ不要）
+          vision   → VLM + pyautogui 視覚制御（任意 VTT 対応）
+          ccfolia  → CCFolia Playwright 操作（既存・デフォルト）
+        """
+        try:
+            from config import get_vtt_backend, get_foundry_url, get_foundry_api_key
+            from config import get_vision_vtt_window, get_vision_vtt_grid_size
+            from config import get_vision_vtt_chat_region, get_vision_vtt_board_region
+        except ModuleNotFoundError:
+            from core.config import get_vtt_backend, get_foundry_url, get_foundry_api_key  # type: ignore
+            from core.config import get_vision_vtt_window, get_vision_vtt_grid_size  # type: ignore
+            from core.config import get_vision_vtt_chat_region, get_vision_vtt_board_region  # type: ignore
+
+        vtt_backend = get_vtt_backend()
+
+        if vtt_backend == "foundry":
+            print("⏳ Foundry VTT REST API に接続しています...")
+            try:
+                from vtt_adapters.foundry_adapter import FoundryVTTAdapter
+            except ModuleNotFoundError:
+                from core.vtt_adapters.foundry_adapter import FoundryVTTAdapter  # type: ignore
+            self.adapter = FoundryVTTAdapter(
+                base_url=get_foundry_url(),
+                api_key=get_foundry_api_key(),
+            )
+            self._run_async(self.adapter.connect(self.room_url))
+            self._health.vtt_mode = "foundry"
+            print(f"✓ Foundry VTT に接続: {get_foundry_url()}")
+            self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
+            self._health.vtt_connected = True
+            return
+
+        if vtt_backend == "vision":
+            print("⏳ VisionVTT アダプター（VLM 視覚制御）を起動しています...")
+            try:
+                from vtt_adapters.vision_adapter import VisionVTTAdapter
+            except ModuleNotFoundError:
+                from core.vtt_adapters.vision_adapter import VisionVTTAdapter  # type: ignore
+            self.adapter = VisionVTTAdapter(
+                lm_client=self.lm_client,
+                window_title=get_vision_vtt_window(),
+                grid_size=get_vision_vtt_grid_size(),
+                chat_region=get_vision_vtt_chat_region(),
+                board_region=get_vision_vtt_board_region(),
+            )
+            self._run_async(self.adapter.connect(self.room_url))
+            self._health.vtt_mode = "vision"
+            print(f"✓ VisionVTT 起動 (ウィンドウ: '{get_vision_vtt_window() or 'プライマリモニタ全体'}')")
+            self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
+            self._health.vtt_connected = True
+            return
+
+        # ── ccfolia バックエンド（既存ロジック） ────────────────
         if self.cdp_url:
             # CDP接続: GMが既に開いているブラウザに接続（権限継承）
             print(f"⏳ 既存ブラウザにCDP接続しています... ({self.cdp_url})")

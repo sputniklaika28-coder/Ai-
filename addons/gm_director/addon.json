@@ -1,0 +1,19 @@
+{
+  "id": "gm_director",
+  "name": "GMDirector — セッション統合オーケストレーター (Phase 4)",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "プレイヤーの行動を解釈し、戦闘解決・ナレーション生成・エンティティ追跡を統合処理するGMの中枢。combat_engineとの連携が必要。",
+  "author": "core",
+  "dependencies": ["combat_engine"],
+  "entry_point": "addon.py",
+  "class_name": "GMDirectorAddon",
+  "tools": [
+    "process_player_turn",
+    "get_session_context",
+    "upsert_entity",
+    "get_entity",
+    "list_entities",
+    "deactivate_entity"
+  ]
+}
