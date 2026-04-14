@@ -128,3 +128,89 @@ def get_vlm_agent_perceive_backend() -> str:
     if v not in {"none", "cv", "omniparser"}:
         return "none"
     return v
+
+
+# ──────────────────────────────────────────
+# VTT バックエンド選択
+# ──────────────────────────────────────────
+
+
+def get_vtt_backend() -> str:
+    """VTT バックエンド名: 'ccfolia' | 'foundry' | 'vision'。既定 'ccfolia'。"""
+    _vlm_agent_env_loaded()
+    v = os.getenv("VTT_BACKEND", "ccfolia").strip().lower()
+    if v not in {"ccfolia", "foundry", "vision"}:
+        return "ccfolia"
+    return v
+
+
+# ──────────────────────────────────────────
+# Foundry VTT アダプター設定
+# ──────────────────────────────────────────
+
+
+def get_foundry_url() -> str:
+    """Foundry VTT サーバー URL。既定 'http://localhost:30000'。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("FOUNDRY_URL", "http://localhost:30000").rstrip("/")
+
+
+def get_foundry_api_key() -> str:
+    """Foundry VTT API キー（foundryvtt-rest-api モジュール用）。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("FOUNDRY_API_KEY", "")
+
+
+# ──────────────────────────────────────────
+# VisionVTT アダプター設定
+# ──────────────────────────────────────────
+
+
+def get_vision_vtt_window() -> str:
+    """VisionVTT の対象ウィンドウタイトル正規表現。既定空欄（全画面）。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("VISION_VTT_WINDOW", "")
+
+
+def get_vision_vtt_grid_size() -> int:
+    """1グリッドセルのピクセルサイズ。既定 100。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(1, int(os.getenv("VISION_VTT_GRID_SIZE", "100")))
+    except ValueError:
+        return 100
+
+
+def _parse_region_env(key: str) -> tuple[int, int, int, int] | None:
+    """'left,top,right,bottom' 形式の環境変数を tuple に変換する。"""
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return None
+    try:
+        parts = [int(v) for v in raw.split(",")]
+        if len(parts) == 4:
+            return (parts[0], parts[1], parts[2], parts[3])
+    except ValueError:
+        pass
+    return None
+
+
+def get_vision_vtt_chat_region() -> tuple[int, int, int, int] | None:
+    """チャットログのキャプチャ領域 (left, top, right, bottom)。省略可。"""
+    _vlm_agent_env_loaded()
+    return _parse_region_env("VISION_VTT_CHAT_LOG_REGION")
+
+
+def get_vision_vtt_board_region() -> tuple[int, int, int, int] | None:
+    """ボードのキャプチャ領域 (left, top, right, bottom)。省略可。"""
+    _vlm_agent_env_loaded()
+    return _parse_region_env("VISION_VTT_BOARD_REGION")
+
+
+def get_vision_vtt_max_steps() -> int:
+    """VisionVTT の VLM 操作最大ステップ数。既定 6。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(1, int(os.getenv("VISION_VTT_MAX_STEPS", "6")))
+    except ValueError:
+        return 6

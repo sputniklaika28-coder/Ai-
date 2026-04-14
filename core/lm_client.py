@@ -3,9 +3,18 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import re
+from typing import TYPE_CHECKING, Type, TypeVar
 
 import httpx
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel as _BaseModel
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class LMClient:
@@ -209,6 +218,104 @@ class LMClient:
     def generate_response_sync(self, *args, **kwargs):
         """threading 環境からの呼び出し用同期ラッパー。"""
         return asyncio.run(self.generate_response(*args, **kwargs))
+
+    async def generate_structured(
+        self,
+        system_prompt: str,
+        user_message: str,
+        schema: "Type[_T]",
+        *,
+        temperature: float = 0.3,
+        max_tokens: int = 500,
+        timeout: int | None = 120,
+        strict: bool = True,
+    ) -> "_T | None":
+        """Pydantic スキーマを用いた構造化出力生成。
+
+        OpenAI json_schema モードでモデルレベルの JSON 整合性を強制する。
+        正規表現・ブルートフォース探索は一切使用しない。
+
+        Args:
+            system_prompt: システムプロンプト。
+            user_message: ユーザーメッセージ。
+            schema: 期待する Pydantic v2 モデルクラス。
+            temperature: 生成温度（構造化出力は低めを推奨）。
+            max_tokens: 最大トークン数。
+            timeout: タイムアウト（秒）。
+            strict: json_schema の strict モード（True推奨）。
+
+        Returns:
+            バリデーション済みの Pydantic モデルインスタンス。
+            失敗した場合は None。
+        """
+        from pydantic import BaseModel, ValidationError
+
+        if not await self.is_server_running():
+            return None
+
+        json_schema = schema.model_json_schema()  # type: ignore[attr-defined]
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.__name__,
+                    "schema": json_schema,
+                    "strict": strict,
+                },
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/chat/completions", json=payload
+                )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "generate_structured: HTTP %d — %s",
+                    response.status_code,
+                    response.text[:200],
+                )
+                return None
+
+            result = response.json()
+            message = result["choices"][0]["message"]
+            raw_content = message.get("content") or ""
+
+            # 推論モデル: content が空の場合 reasoning_content から JSON を探す
+            if not raw_content.strip():
+                reasoning = (message.get("reasoning_content") or "").strip()
+                if reasoning:
+                    found = self._find_json_in_text(reasoning)
+                    if found:
+                        raw_content = found
+
+            if not raw_content.strip():
+                logger.warning("generate_structured: empty content for %s", schema.__name__)
+                return None
+
+            return schema.model_validate_json(raw_content)  # type: ignore[attr-defined]
+
+        except ValidationError as e:
+            logger.warning("generate_structured: ValidationError for %s: %s", schema.__name__, e)
+            return None
+        except Exception as e:
+            logger.error("generate_structured エラー (%s): %s", schema.__name__, e)
+            return None
+
+    def generate_structured_sync(self, *args, **kwargs) -> "_T | None":
+        """threading 環境からの呼び出し用同期ラッパー。"""
+        return asyncio.run(self.generate_structured(*args, **kwargs))
 
     async def generate_with_tools(
         self,
