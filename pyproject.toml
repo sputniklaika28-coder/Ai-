@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "タクティカル祓魔師 TRPG AI — ローカル LLM を使った TRPG ゲームマスター支援システム"
 requires-python = ">=3.12"
 dependencies = [
-    "requests>=2.31",
+    "requests>=2.33.0",
     "httpx>=0.27",
     "selenium>=4.0",
     "playwright>=1.40",
