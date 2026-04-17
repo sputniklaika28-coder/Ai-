@@ -532,6 +532,11 @@ class CCFoliaConnector:
         # セッション・コパイロット（Phase 4）
         self._copilot: object | None = None
 
+        # GMDirector 直接統合（Phase 5）
+        self._gm_director: object | None = None
+        self._entity_tracker: object | None = None
+        self._entity_path: Path | None = None
+
         # ビルドモード・システムヘルス
         self._build_status = BuildModeStatus()
         self._health = SystemHealthStatus(room_url=room_url)
@@ -679,6 +684,86 @@ class CCFoliaConnector:
             logger.info("SessionCoPilot 初期化完了")
         except Exception as e:
             logger.warning("SessionCoPilot 初期化エラー: %s", e)
+
+    def _init_gm_director(self) -> None:
+        """GMDirector をコネクター直下に初期化し、アドオンと状態を共有する。"""
+        try:
+            from core.entity_tracker import EntityTracker
+            from core.game_state import GameState
+            from core.gm_director import GMDirector, GMDirectorConfig
+
+            gm_addon = self._get_gm_director_addon()
+            if gm_addon and getattr(gm_addon, '_entities', None):
+                self._entity_tracker = gm_addon._entities
+            else:
+                self._entity_tracker = EntityTracker()
+
+            game_state = self._get_game_state_from_addons()
+
+            session_dir = getattr(self.sm, 'current_session_dir', None)
+            if session_dir:
+                self._entity_path = Path(session_dir) / "entities.json"
+
+            config = GMDirectorConfig(
+                auto_resolve_combat=True,
+                inject_game_state=True,
+                inject_entities=True,
+                inject_memory=True,
+                auto_extract_entities=True,
+            )
+            self._gm_director = GMDirector(
+                lm_client=self.lm_client,
+                game_state=game_state,
+                entity_tracker=self._entity_tracker,
+                config=config,
+                memory_manager=self.ctx._memory,
+            )
+
+            if gm_addon:
+                gm_addon._director = self._gm_director
+                gm_addon._entities = self._entity_tracker
+
+            logger.info("GMDirector 直接統合: 初期化完了")
+        except Exception as e:
+            logger.warning("GMDirector 初期化エラー: %s", e)
+
+    def _get_gm_director_addon(self):
+        """GMDirector アドオンのインスタンスを取得する。"""
+        try:
+            return self.addon_manager.get_addon("gm_director")
+        except Exception:
+            return None
+
+    def _get_game_state_from_addons(self):
+        """combat_engine アドオンの GameState を取得。なければ新規作成。"""
+        from core.game_state import GameState
+        try:
+            combat_addon = self.addon_manager.get_addon("combat_engine")
+            if combat_addon and hasattr(combat_addon, '_game_state'):
+                return combat_addon._game_state
+        except Exception:
+            pass
+        return GameState()
+
+    def _fallback_simple_response(self, target_char: dict, enriched: str) -> None:
+        """GMDirector が利用できない場合の素の LLM 応答（フォールバック）。"""
+        prompt_tmpl = self.pm.get_template(target_char.get("prompt_id"))
+        parts = []
+        if self.world_setting.strip():
+            parts.append(self.world_setting.strip())
+        if prompt_tmpl and prompt_tmpl.get("system", "").strip():
+            parts.append(prompt_tmpl["system"].strip())
+        sys_prompt = "\n\n".join(parts)
+
+        res, _ = self._run_async(self.lm_client.generate_response(
+            system_prompt=sys_prompt,
+            user_message=enriched,
+            max_tokens=8192,
+        ))
+        if res:
+            self._post_message(target_char["name"], f"[AI] {res}")
+            self.ctx.add_message(target_char["name"], res, is_ai=True)
+            print(f"   ✓ 応答(fallback): {res[:40]}...")
 
     def _init_knowledge(self) -> None:
         """KnowledgeManager を初期化し、世界観データを取り込む。"""
@@ -1114,25 +1199,30 @@ class CCFoliaConnector:
 
                         if self.ctx.phase in ["combat", "mission"]:
                             self._run_agent_loop(target_char, "meta_gm", enriched)
+                        elif self._gm_director is not None:
+                            # Phase 5: GMDirector で全フェーズ統合処理
+                            try:
+                                result = self._run_async(
+                                    self._gm_director.process_turn(
+                                        player_message=body,
+                                        character_name=speaker,
+                                        extra_context=f"【フェイズ: {self.ctx.phase.upper()}】",
+                                    )
+                                )
+                                for line in result.vtt_chat_lines:
+                                    self._post_system_message(target_char["name"], line)
+                                    print(f"   ✓ GMDirector応答: {line[:40]}...")
+
+                                if self._entity_tracker and self._entity_path:
+                                    try:
+                                        self._entity_tracker.save(self._entity_path)
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                logger.error("GMDirector 処理エラー (fallback): %s", e)
+                                self._fallback_simple_response(target_char, enriched)
                         else:
-                            prompt_tmpl = self.pm.get_template(target_char.get("prompt_id"))
-                            parts = []
-                            if self.world_setting.strip():
-                                parts.append(self.world_setting.strip())
-                            if prompt_tmpl and prompt_tmpl.get("system", "").strip():
-                                parts.append(prompt_tmpl["system"].strip())
-                            sys_prompt = "\n\n".join(parts)
-
-                            res, _ = self._run_async(self.lm_client.generate_response(
-                                system_prompt=sys_prompt,
-                                user_message=enriched,
-                                max_tokens=8192,
-                            ))
-
-                            if res:
-                                self._post_message(target_char["name"], f"[AI] {res}")
-                                self.ctx.add_message(target_char["name"], res, is_ai=True)
-                                print(f"   ✓ 応答: {res[:40]}...")
+                            self._fallback_simple_response(target_char, enriched)
 
             self._known_messages = self._known_messages[-300:]
             self._drain_stdin_queue()
@@ -1202,6 +1292,7 @@ class CCFoliaConnector:
         self._init_knowledge()
         self._init_copilot()
         self._init_addons()
+        self._init_gm_director()
         self._check_lm_health()
         print(f"   [ヘルス] {self._health.to_display()}")
         self._running = True

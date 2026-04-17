@@ -61,11 +61,12 @@ def _make_director(
     entity_tracker: EntityTracker | None = None,
     lm_client: Any = None,
     config: GMDirectorConfig | None = None,
+    memory_manager: Any = None,
 ) -> GMDirector:
     gs = game_state or _make_game_state()
     et = entity_tracker or EntityTracker()
     lm = lm_client or _make_lm_client()
-    return GMDirector(lm, gs, et, config=config)
+    return GMDirector(lm, gs, et, config=config, memory_manager=memory_manager)
 
 
 # ──────────────────────────────────────
@@ -408,3 +409,60 @@ class TestFallback:
         # フォールバック意図 (action_type="other") が設定されること
         assert result.intention is not None
         assert result.error is None
+
+
+# ──────────────────────────────────────
+# build_context_block() — MemoryManager 統合
+# ──────────────────────────────────────
+
+
+class TestBuildContextBlockWithMemory:
+    def _make_memory(self, messages: list[tuple[str, str]] | None = None):
+        from core.memory_manager import MemoryManager
+        mm = MemoryManager(lm_client=None)
+        for speaker, body in (messages or []):
+            mm.add_message(speaker, body)
+        return mm
+
+    def test_memory_context_injected(self):
+        """MemoryManager にメッセージがある場合、context_block に会話履歴が含まれること。"""
+        mm = self._make_memory([("アリス", "扉を開ける"), ("GM", "軋む音がした")])
+        director = _make_director(memory_manager=mm)
+        block = director.build_context_block()
+        assert "アリス" in block or "直近の会話" in block
+
+    def test_no_memory_manager(self):
+        """MemoryManager が None の場合、従来通り動作すること。"""
+        director = _make_director()
+        block = director.build_context_block()
+        # エラーにならず文字列を返す
+        assert isinstance(block, str)
+
+    def test_inject_memory_disabled(self):
+        """inject_memory=False の場合、メモリコンテキストが注入されないこと。"""
+        mm = self._make_memory([("アリス", "探索する"), ("GM", "廃墟が見えた")])
+        config = GMDirectorConfig(inject_memory=False)
+        director = _make_director(config=config, memory_manager=mm)
+        block = director.build_context_block()
+        # MemoryManager の内容が含まれないこと
+        assert "直近の会話" not in block
+        assert "これまでのあらすじ" not in block
+
+    def test_set_memory_manager_late(self):
+        """set_memory_manager() で後から注入した MemoryManager が反映されること。"""
+        director = _make_director()
+        mm = self._make_memory([("ボブ", "罠を調べる")])
+        director.set_memory_manager(mm)
+        block = director.build_context_block()
+        assert "ボブ" in block or "直近の会話" in block
+
+    @pytest.mark.asyncio
+    async def test_process_turn_includes_memory_in_context_injected(self):
+        """process_turn() の context_injected にメモリコンテキストが含まれること。"""
+        mm = self._make_memory([("アリス", "洞窟に入る")])
+        director = _make_director(
+            lm_client=_make_lm_client(narration="暗闇が広がる"),
+            memory_manager=mm,
+        )
+        result = await director.process_turn("進む", "アリス")
+        assert "アリス" in result.context_injected or "直近の会話" in result.context_injected
