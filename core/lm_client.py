@@ -219,6 +219,10 @@ class LMClient:
         """threading 環境からの呼び出し用同期ラッパー。"""
         return asyncio.run(self.generate_response(*args, **kwargs))
 
+    def is_server_running_sync(self) -> bool:
+        """threading 環境からの呼び出し用同期ラッパー。"""
+        return asyncio.run(self.is_server_running())
+
     async def generate_structured(
         self,
         system_prompt: str,
