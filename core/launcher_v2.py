@@ -116,6 +116,48 @@ def check_lm_studio() -> bool:
         return False
 
 
+def _resolve_image_path(image_path: str | Path | None) -> Path | None:
+    """image_path 文字列を絶対パスに解決する。空/不在時は None。"""
+    if not image_path:
+        return None
+    p = Path(image_path)
+    if not p.is_absolute():
+        p = BASE_DIR / p
+    return p if p.exists() else None
+
+
+def _load_character_thumbnail(image_path: str | Path | None, size: int = 48):
+    """キャラクターカード用のサムネを返す（CTkImage）。PIL 不在時は None。"""
+    resolved = _resolve_image_path(image_path)
+    if resolved is None:
+        return None
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return None
+    try:
+        img = Image.open(resolved).convert("RGBA")
+        return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+    except Exception:
+        return None
+
+
+def _load_character_portrait(image_path: str | Path | None, size: tuple[int, int] = (160, 220)):
+    """CharacterDialog 用の立ち絵プレビュー CTkImage を返す。"""
+    resolved = _resolve_image_path(image_path)
+    if resolved is None:
+        return None
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return None
+    try:
+        img = Image.open(resolved).convert("RGBA")
+        return ctk.CTkImage(light_image=img, dark_image=img, size=size)
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────
 # デザインシステム
 # ─────────────────────────────────────────────────────────────────
@@ -196,7 +238,7 @@ _NAV_ITEMS: list[tuple[str, str]] = [
 class Sidebar(ctk.CTkFrame):
     """左サイドバー — ナビゲーションボタン群"""
 
-    def __init__(self, parent: ctk.CTk, on_nav_click):
+    def __init__(self, parent: ctk.CTk, on_nav_click, on_system_change=None):
         super().__init__(
             parent,
             width=190,
@@ -205,7 +247,10 @@ class Sidebar(ctk.CTkFrame):
         )
         self.pack_propagate(False)
         self._on_nav_click = on_nav_click
+        self._on_system_change = on_system_change
         self._buttons: dict[str, ctk.CTkButton] = {}
+        self._system_label_to_id: dict[str, str] = {}
+        self._system_menu: ctk.CTkOptionMenu | None = None
         self._build()
 
     def _build(self) -> None:
@@ -224,6 +269,28 @@ class Sidebar(ctk.CTkFrame):
             font=ctk.CTkFont(family="Yu Gothic UI", size=9),
             text_color=AppTheme.TEXT_DIM,
         ).pack(anchor="w")
+
+        # ルールシステムセレクタ
+        sys_frame = ctk.CTkFrame(self, fg_color="transparent")
+        sys_frame.pack(fill="x", padx=12, pady=(8, 0))
+        ctk.CTkLabel(
+            sys_frame,
+            text="ルールシステム",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(anchor="w")
+        self._system_menu = ctk.CTkOptionMenu(
+            sys_frame,
+            values=["(読み込み中)"],
+            command=self._on_system_menu_change,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            fg_color="#2b2b2b",
+            button_color=AppTheme.ACCENT,
+            button_hover_color=AppTheme.SIDEBAR_HOVER,
+            dropdown_font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            height=28,
+        )
+        self._system_menu.pack(fill="x", pady=(2, 0))
 
         # 区切り線
         ctk.CTkFrame(self, height=1, fg_color="#333333").pack(fill="x", padx=8, pady=(8, 12))
@@ -260,6 +327,37 @@ class Sidebar(ctk.CTkFrame):
                 btn.configure(fg_color=AppTheme.ACCENT, text_color=AppTheme.TEXT_HEAD)
             else:
                 btn.configure(fg_color="transparent", text_color=AppTheme.TEXT)
+
+    def populate_systems(self, entries: list, active_id: str) -> None:
+        """システムセレクタの選択肢を設定する。entries は SystemEntry のリスト。"""
+        if self._system_menu is None:
+            return
+        labels = []
+        self._system_label_to_id = {}
+        active_label: str | None = None
+        for entry in entries:
+            label = entry.label
+            # 同名ラベル衝突を避ける
+            if label in self._system_label_to_id:
+                label = f"{entry.label} ({entry.id})"
+            labels.append(label)
+            self._system_label_to_id[label] = entry.id
+            if entry.id == active_id:
+                active_label = label
+        if not labels:
+            labels = ["(システムなし)"]
+        self._system_menu.configure(values=labels)
+        if active_label is not None:
+            self._system_menu.set(active_label)
+        else:
+            self._system_menu.set(labels[0])
+
+    def _on_system_menu_change(self, choice: str) -> None:
+        if self._on_system_change is None:
+            return
+        sys_id = self._system_label_to_id.get(choice)
+        if sys_id:
+            self._on_system_change(sys_id)
 
     def add_addon_button(self, key: str, label: str, on_click) -> None:
         """アドオン用のナビゲーションボタンを追加"""
@@ -926,7 +1024,7 @@ class HomeView(ctk.CTkFrame):
 # キャラクター編集ダイアログ（tk.Toplevel 流用）
 # ─────────────────────────────────────────────────────────────────
 
-class CharacterDialog(tk.Toplevel):
+class CharacterDialog(ctk.CTkToplevel):
     LAYERS = ["meta", "setting", "player"]
     ROLES  = ["game_master", "npc_manager", "enemy", "player"]
 
@@ -936,57 +1034,204 @@ class CharacterDialog(tk.Toplevel):
         self.is_edit = char_data is not None
         self.existing_ids = existing_ids or []
         self.char_data = char_data or {}
+        self._portrait_image_ref = None  # CTkImage の強参照保持
+        self._portrait_busy = False
         self.title("キャラクター編集" if self.is_edit else "キャラクター追加")
-        self.geometry("500x560")
+        self.configure(fg_color=AppTheme.BG)
+        self.geometry("760x600")
         self.resizable(False, False)
-        self.grab_set()
+        self.transient(parent)
+        self.after(50, self.grab_set)
         self._build_ui()
         self._load_data()
         self.update_idletasks()
-        px = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
-        py = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{px}+{py}")
+        try:
+            px = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+            py = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+            self.geometry(f"+{max(0, px)}+{max(0, py)}")
+        except Exception:
+            pass
 
     def _build_ui(self):
-        pad = {"padx": 12, "pady": 5}
-        frame = ttk.Frame(self, padding=16)
-        frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="キャラクターID（英数字・_のみ）").grid(row=0, column=0, sticky="w", **pad)
+        root = ctk.CTkFrame(self, fg_color=AppTheme.BG)
+        root.pack(fill="both", expand=True, padx=12, pady=12)
+
+        # 2カラムレイアウト
+        root.columnconfigure(0, weight=1)
+        root.columnconfigure(1, minsize=200, weight=0)
+        root.rowconfigure(0, weight=1)
+
+        form = ctk.CTkScrollableFrame(root, fg_color=AppTheme.SURFACE, corner_radius=8)
+        form.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        side = ctk.CTkFrame(root, fg_color=AppTheme.SURFACE, corner_radius=8, width=200)
+        side.grid(row=0, column=1, sticky="nsew")
+        side.grid_propagate(False)
+
+        # ── フォーム ──
+        def _label(text: str) -> ctk.CTkLabel:
+            return ctk.CTkLabel(
+                form, text=text, anchor="w",
+                font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+                text_color=AppTheme.TEXT,
+            )
+
+        _label("キャラクターID（英数字・_のみ）").pack(anchor="w", padx=12, pady=(10, 2))
         self.var_id = tk.StringVar()
-        self.entry_id = ttk.Entry(frame, textvariable=self.var_id, width=35)
-        self.entry_id.grid(row=0, column=1, sticky="w", **pad)
+        self.entry_id = ctk.CTkEntry(
+            form, textvariable=self.var_id,
+            fg_color="#1a1a1a", border_color="#333333",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        self.entry_id.pack(fill="x", padx=12, pady=(0, 6))
         if self.is_edit:
-            self.entry_id.config(state="disabled")
-        ttk.Label(frame, text="名前（表示用）").grid(row=1, column=0, sticky="w", **pad)
+            self.entry_id.configure(state="disabled")
+
+        _label("名前（表示用）").pack(anchor="w", padx=12, pady=(4, 2))
         self.var_name = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.var_name, width=35).grid(row=1, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="レイヤー").grid(row=2, column=0, sticky="w", **pad)
-        self.var_layer = tk.StringVar()
-        ttk.Combobox(frame, textvariable=self.var_layer, values=self.LAYERS,
-                     state="readonly", width=20).grid(row=2, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="役割").grid(row=3, column=0, sticky="w", **pad)
-        self.var_role = tk.StringVar()
-        ttk.Combobox(frame, textvariable=self.var_role, values=self.ROLES,
-                     state="readonly", width=20).grid(row=3, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="プロンプトテンプレート").grid(row=4, column=0, sticky="w", **pad)
+        ctk.CTkEntry(
+            form, textvariable=self.var_name,
+            fg_color="#1a1a1a", border_color="#333333",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        _label("レイヤー").pack(anchor="w", padx=12, pady=(4, 2))
+        self.var_layer = tk.StringVar(value="setting")
+        ctk.CTkOptionMenu(
+            form, variable=self.var_layer, values=self.LAYERS,
+            fg_color="#2b2b2b", button_color=AppTheme.ACCENT,
+            button_hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        _label("役割").pack(anchor="w", padx=12, pady=(4, 2))
+        self.var_role = tk.StringVar(value="npc_manager")
+        ctk.CTkOptionMenu(
+            form, variable=self.var_role, values=self.ROLES,
+            fg_color="#2b2b2b", button_color=AppTheme.ACCENT,
+            button_hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        _label("プロンプトテンプレート").pack(anchor="w", padx=12, pady=(4, 2))
         self.var_prompt = tk.StringVar()
-        self.cb_prompt = ttk.Combobox(frame, textvariable=self.var_prompt,
-                                       values=get_template_ids(), state="readonly", width=30)
-        self.cb_prompt.grid(row=4, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="反応キーワード（カンマ区切り）").grid(row=5, column=0, sticky="w", **pad)
+        prompt_values = get_template_ids() or ["(なし)"]
+        self.cb_prompt = ctk.CTkOptionMenu(
+            form, variable=self.var_prompt, values=prompt_values,
+            fg_color="#2b2b2b", button_color=AppTheme.ACCENT,
+            button_hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        self.cb_prompt.pack(fill="x", padx=12, pady=(0, 6))
+
+        _label("反応キーワード（カンマ区切り）").pack(anchor="w", padx=12, pady=(4, 2))
         self.var_keywords = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.var_keywords, width=35).grid(row=5, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="説明").grid(row=6, column=0, sticky="nw", **pad)
-        self.text_desc = tk.Text(frame, width=35, height=3, font=("", 10))
-        self.text_desc.grid(row=6, column=1, sticky="w", **pad)
+        ctk.CTkEntry(
+            form, textvariable=self.var_keywords,
+            fg_color="#1a1a1a", border_color="#333333",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        _label("説明").pack(anchor="w", padx=12, pady=(4, 2))
+        self.text_desc = ctk.CTkTextbox(
+            form, height=120,
+            fg_color="#1a1a1a", text_color=AppTheme.TEXT, wrap="word",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        self.text_desc.pack(fill="x", padx=12, pady=(0, 6))
+
+        flags = ctk.CTkFrame(form, fg_color="transparent")
+        flags.pack(fill="x", padx=12, pady=(4, 10))
         self.var_enabled = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="有効", variable=self.var_enabled).grid(row=7, column=0, sticky="w", **pad)
         self.var_is_ai = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="AI制御", variable=self.var_is_ai).grid(row=7, column=1, sticky="w", **pad)
-        btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=8, column=0, columnspan=2, pady=14)
-        ttk.Button(btn_frame, text="保存", command=self._on_save, width=12).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_frame, text="キャンセル", command=self.destroy, width=12).pack(side=tk.LEFT, padx=8)
+        ctk.CTkCheckBox(
+            flags, text="有効", variable=self.var_enabled,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+        ).pack(side="left", padx=(0, 16))
+        ctk.CTkCheckBox(
+            flags, text="AI制御", variable=self.var_is_ai,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+        ).pack(side="left")
+
+        # ── 右側: 立ち絵プレビュー ──
+        ctk.CTkLabel(
+            side, text="立ち絵",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            text_color=AppTheme.TEXT_HEAD,
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        self._portrait_frame = ctk.CTkFrame(
+            side, fg_color="#111111", corner_radius=6, width=180, height=240,
+        )
+        self._portrait_frame.pack(padx=10, pady=(0, 6))
+        self._portrait_frame.pack_propagate(False)
+        self._portrait_label = ctk.CTkLabel(
+            self._portrait_frame, text="(画像なし)",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT_DIM,
+        )
+        self._portrait_label.pack(fill="both", expand=True)
+
+        self.var_image_path = tk.StringVar(value="")
+        ctk.CTkLabel(
+            side, textvariable=self.var_image_path,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=8),
+            text_color=AppTheme.TEXT_DIM, wraplength=180,
+        ).pack(padx=10, pady=(0, 4))
+
+        self._portrait_status_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            side, textvariable=self._portrait_status_var,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM, wraplength=180,
+        ).pack(padx=10, pady=(0, 6))
+
+        self._btn_generate_portrait = ctk.CTkButton(
+            side, text="立ち絵を生成", height=30,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            command=self._on_generate_portrait,
+        )
+        self._btn_generate_portrait.pack(fill="x", padx=10, pady=(0, 4))
+
+        ctk.CTkButton(
+            side, text="画像を選択", height=26,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=self._on_browse_image,
+        ).pack(fill="x", padx=10, pady=(0, 4))
+
+        ctk.CTkButton(
+            side, text="クリア", height=24,
+            fg_color="#2b2b2b", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=self._on_clear_image,
+        ).pack(fill="x", padx=10, pady=(0, 10))
+
+        # portrait_generator アドオンが有効でなければ生成ボタンを無効化
+        if not self._is_portrait_addon_enabled():
+            self._btn_generate_portrait.configure(
+                state="disabled", text="(portrait_generator 無効)"
+            )
+
+        # ── ボタン行 ──
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 12))
+        ctk.CTkButton(
+            btn_row, text="保存", width=120, height=34,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            command=self._on_save,
+        ).pack(side="right", padx=4)
+        ctk.CTkButton(
+            btn_row, text="キャンセル", width=120, height=34,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11),
+            command=self.destroy,
+        ).pack(side="right", padx=4)
 
     def _load_data(self):
         if not self.char_data:
@@ -997,11 +1242,134 @@ class CharacterDialog(tk.Toplevel):
         self.var_name.set(self.char_data.get("name", ""))
         self.var_layer.set(self.char_data.get("layer", "setting"))
         self.var_role.set(self.char_data.get("role", "npc_manager"))
-        self.var_prompt.set(self.char_data.get("prompt_id", ""))
+        if self.char_data.get("prompt_id"):
+            self.var_prompt.set(self.char_data["prompt_id"])
         self.var_enabled.set(self.char_data.get("enabled", True))
         self.var_is_ai.set(self.char_data.get("is_ai", True))
-        self.text_desc.insert("1.0", self.char_data.get("description", ""))
+        self.text_desc.insert("0.0", self.char_data.get("description", ""))
         self.var_keywords.set(", ".join(self.char_data.get("keywords", [])))
+        self.var_image_path.set(self.char_data.get("image_path", "") or "")
+        self._refresh_portrait_preview()
+
+    def _refresh_portrait_preview(self) -> None:
+        path = self.var_image_path.get().strip()
+        img = _load_character_portrait(path, size=(160, 220))
+        if img is not None:
+            self._portrait_image_ref = img
+            self._portrait_label.configure(image=img, text="")
+        else:
+            self._portrait_image_ref = None
+            msg = "(画像なし)" if not path else "(読込失敗)"
+            self._portrait_label.configure(image=None, text=msg)
+
+    def _on_browse_image(self) -> None:
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="キャラクター画像を選択",
+            filetypes=[("画像", "*.png *.jpg *.jpeg *.webp"), ("すべて", "*.*")],
+        )
+        if not path:
+            return
+        self.var_image_path.set(path)
+        self._refresh_portrait_preview()
+
+    def _on_clear_image(self) -> None:
+        self.var_image_path.set("")
+        self._refresh_portrait_preview()
+
+    def _is_portrait_addon_enabled(self) -> bool:
+        try:
+            from addon_management_tab import AddonStateManager
+            state_mgr = AddonStateManager(ADDON_STATE_JSON)
+            enabled = state_mgr.state.get("enabled", [])
+            return "portrait_generator" in enabled
+        except Exception:
+            return False
+
+    def _on_generate_portrait(self) -> None:
+        if self._portrait_busy:
+            return
+        char_id = self.var_id.get().strip() or "unnamed"
+        name = self.var_name.get().strip() or char_id
+        description = self.text_desc.get("0.0", "end").strip()
+        if not description:
+            messagebox.showwarning(
+                "入力不足",
+                "立ち絵生成には『説明』欄に外見や特徴の記述が必要です。",
+                parent=self,
+            )
+            return
+
+        self._portrait_busy = True
+        self._btn_generate_portrait.configure(state="disabled", text="生成中...")
+        self._portrait_status_var.set("ComfyUI に接続中...")
+
+        def run():
+            try:
+                from core.addons.addon_manager import AddonManager
+                from core.addons.addon_base import AddonContext, ToolExecutionContext
+                from lm_client import LMClient
+
+                mgr = AddonManager(addons_dir=ADDONS_DIR)
+                mgr.discover()
+                ctx = AddonContext(
+                    adapter=None,
+                    lm_client=LMClient(),
+                    knowledge_manager=None,
+                    session_manager=None,
+                    character_manager=None,
+                    root_dir=BASE_DIR,
+                )
+                mgr.load_enabled(["portrait_generator"], ctx)
+                addon = mgr.loaded_addons.get("portrait_generator")
+                if addon is None:
+                    _post_to_main(lambda: self._portrait_finish_fail("portrait_generator の読み込みに失敗しました"))
+                    return
+
+                tool_ctx = ToolExecutionContext(
+                    char_name=name, tool_call_id="portrait_dialog",
+                    adapter=None, connector=None,
+                )
+                args = {
+                    "character_id": char_id,
+                    "character_name": name,
+                    "description": description,
+                }
+                finished, result_json = addon.execute_tool(
+                    "generate_character_portrait", args, tool_ctx,
+                )
+                try:
+                    result = json.loads(result_json) if result_json else {}
+                except Exception:
+                    result = {}
+                image_path = (
+                    result.get("image_path")
+                    or result.get("path")
+                    or result.get("file")
+                )
+                if image_path:
+                    _post_to_main(lambda p=image_path: self._portrait_finish_ok(p))
+                else:
+                    err = result.get("error") or "不明なエラー"
+                    _post_to_main(lambda e=err: self._portrait_finish_fail(f"生成失敗: {e}"))
+            except Exception as e:
+                _post_to_main(lambda err=e: self._portrait_finish_fail(f"例外: {err}"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _portrait_finish_ok(self, image_path: str) -> None:
+        self._portrait_busy = False
+        self._btn_generate_portrait.configure(state="normal", text="立ち絵を生成")
+        self.var_image_path.set(image_path)
+        self._portrait_status_var.set("✓ 生成完了")
+        self._refresh_portrait_preview()
+        self.after(4_000, lambda: self._portrait_status_var.set(""))
+
+    def _portrait_finish_fail(self, message: str) -> None:
+        self._portrait_busy = False
+        self._btn_generate_portrait.configure(state="normal", text="立ち絵を生成")
+        self._portrait_status_var.set(f"❌ {message}")
 
     def _on_save(self):
         char_id = self.var_id.get().strip()
@@ -1013,13 +1381,18 @@ class CharacterDialog(tk.Toplevel):
         if not name:
             return messagebox.showerror("エラー", "名前を入力してください", parent=self)
         kw_str = self.var_keywords.get().strip()
+        image_path = self.var_image_path.get().strip() or None
+        prompt_id = self.var_prompt.get().strip()
+        if prompt_id == "(なし)":
+            prompt_id = ""
         self.result = {
             "id": char_id, "name": name,
             "layer": self.var_layer.get(), "role": self.var_role.get(),
             "keywords": [k.strip() for k in kw_str.split(",")] if kw_str else [],
-            "description": self.text_desc.get("1.0", tk.END).strip(),
+            "description": self.text_desc.get("0.0", "end").strip(),
             "enabled": self.var_enabled.get(), "is_ai": self.var_is_ai.get(),
-            "prompt_id": self.var_prompt.get(),
+            "prompt_id": prompt_id,
+            "image_path": image_path,
         }
         self.destroy()
 
@@ -1048,6 +1421,7 @@ class ActorsView(ctk.CTkFrame):
         self._characters: dict = {}
         self._saved_files: list[Path] = []
         self._last_json_raw: dict = {}
+        self._characters_file: Path = CHARACTERS_JSON
         self._init_vars()
         self._build_ui()
 
@@ -1177,7 +1551,7 @@ class ActorsView(ctk.CTkFrame):
         card = ctk.CTkFrame(
             self._char_scroll,
             fg_color="#2a2a2a" if enabled else "#1e1e1e",
-            corner_radius=6, height=52,
+            corner_radius=6, height=64,
         )
         card.pack(fill="x", pady=2)
         card.pack_propagate(False)
@@ -1199,6 +1573,16 @@ class ActorsView(ctk.CTkFrame):
             sw.select()
         else:
             sw.deselect()
+
+        # サムネ（image_path があれば表示、無ければプレースホルダ）
+        thumb = _load_character_thumbnail(char.get("image_path"), size=48)
+        thumb_lbl = ctk.CTkLabel(card, text="" if thumb else "👤", image=thumb,
+                                 width=48, height=48,
+                                 fg_color="#1a1a1a", corner_radius=4,
+                                 font=ctk.CTkFont(family="Yu Gothic UI", size=18),
+                                 text_color=AppTheme.TEXT_DIM)
+        thumb_lbl.pack(side="left", padx=(0, 6))
+        thumb_lbl.bind("<Button-1>", lambda e, i=char_id: self._on_card_click(i))
 
         # 中: 名前 + バッジ
         mid = ctk.CTkFrame(card, fg_color="transparent")
@@ -1230,7 +1614,7 @@ class ActorsView(ctk.CTkFrame):
     def refresh_chars(self) -> None:
         for w in self._char_scroll.winfo_children():
             w.destroy()
-        self._characters = load_json(CHARACTERS_JSON).get("characters", {})
+        self._characters = load_json(self._characters_file).get("characters", {})
         self._selected_char_id: str | None = None
         for char_id, char in self._characters.items():
             self._build_char_card(char_id, char)
@@ -1261,7 +1645,7 @@ class ActorsView(ctk.CTkFrame):
     def _toggle_enable(self, char_id: str, char: dict) -> None:
         char["enabled"] = not char.get("enabled", True)
         self._characters[char_id] = char
-        save_json(CHARACTERS_JSON, {"characters": self._characters})
+        save_json(self._characters_file, {"characters": self._characters})
         self.refresh_chars()
 
     def _on_add(self) -> None:
@@ -1270,7 +1654,7 @@ class ActorsView(ctk.CTkFrame):
         self.wait_window(dlg)
         if dlg.result:
             self._characters[dlg.result["id"]] = dlg.result
-            save_json(CHARACTERS_JSON, {"characters": self._characters})
+            save_json(self._characters_file, {"characters": self._characters})
             self.refresh_chars()
 
     def _on_edit(self) -> None:
@@ -1285,7 +1669,7 @@ class ActorsView(ctk.CTkFrame):
         self.wait_window(dlg)
         if dlg.result:
             self._characters[cid] = dlg.result
-            save_json(CHARACTERS_JSON, {"characters": self._characters})
+            save_json(self._characters_file, {"characters": self._characters})
             self.refresh_chars()
 
     def _on_delete(self) -> None:
@@ -1295,8 +1679,22 @@ class ActorsView(ctk.CTkFrame):
         if messagebox.askyesno("確認", f"'{cid}' を削除しますか？",
                                parent=self.winfo_toplevel()):
             del self._characters[cid]
-            save_json(CHARACTERS_JSON, {"characters": self._characters})
+            save_json(self._characters_file, {"characters": self._characters})
             self.refresh_chars()
+
+    def on_system_changed(self, entry) -> None:
+        """サイドバーでシステムが切り替わった際に呼ばれる。"""
+        self._characters_file = entry.characters_file
+        # 存在しなければ空ファイルを作成（ロードで空辞書になる）
+        if not self._characters_file.exists():
+            try:
+                save_json(self._characters_file, {"characters": {}})
+            except Exception:
+                pass
+        self.refresh_chars()
+
+    def on_show(self) -> None:
+        self.refresh_chars()
 
     # ── メーカータブ ─────────────────────────────────────────────
 
@@ -1639,7 +2037,7 @@ class ActorsView(ctk.CTkFrame):
 """
 
     def _start_generate(self) -> None:
-        if not self._lm_client.is_server_running():
+        if not self._lm_client.is_server_running_sync():
             messagebox.showerror("エラー", "LM-Studioが起動していません。",
                                  parent=self.winfo_toplevel())
             return
@@ -1649,7 +2047,7 @@ class ActorsView(ctk.CTkFrame):
         def run():
             user_req = self._maker_input.get("0.0", "end").strip()
             sys_prompt = "あなたはデータジェネレーターです。必ず指定されたJSON形式のみを出力し、余計な会話はしないでください。"
-            result, _ = self._lm_client.generate_response(
+            result, _ = self._lm_client.generate_response_sync(
                 system_prompt=sys_prompt,
                 user_message=self._build_char_prompt(user_req),
                 temperature=0.7, max_tokens=1500, timeout=None, no_think=True,
@@ -1697,6 +2095,8 @@ class WorldView(ctk.CTkFrame):
         self._text_boxes: dict[str, ctk.CTkTextbox] = {}
         self._rule_vars: dict[str, tk.BooleanVar] = {}
         self._rule_boxes: dict[str, ctk.CTkTextbox] = {}
+        self._world_file: Path = WORLD_SETTING_JSON
+        self._system_name: str = ""
         self._build_ui()
         self.load()
 
@@ -1711,6 +2111,14 @@ class WorldView(ctk.CTkFrame):
             font=ctk.CTkFont(family="Yu Gothic UI", size=14, weight="bold"),
             text_color=AppTheme.TEXT_HEAD,
         ).pack(side="left", padx=16, pady=10)
+
+        self._system_banner_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            header,
+            textvariable=self._system_banner_var,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(side="left", padx=8)
 
         # 保存ボタン群（ヘッダー右）
         self._status_var = tk.StringVar(value="")
@@ -1801,7 +2209,7 @@ class WorldView(ctk.CTkFrame):
             self._rule_boxes[txt_key] = box
 
     def load(self) -> None:
-        data = load_json(WORLD_SETTING_JSON)
+        data = load_json(self._world_file)
         for key, box in self._text_boxes.items():
             box.delete("0.0", "end")
             box.insert("0.0", data.get(key, ""))
@@ -1813,18 +2221,25 @@ class WorldView(ctk.CTkFrame):
         self._status_var.set("読み込み完了")
 
     def save(self) -> None:
-        data = load_json(WORLD_SETTING_JSON)
+        data = load_json(self._world_file)
         for key, box in self._text_boxes.items():
             data[key] = box.get("0.0", "end").strip()
         for var_key, var in self._rule_vars.items():
             data[var_key] = var.get()
         for txt_key, box in self._rule_boxes.items():
             data[txt_key] = box.get("0.0", "end").strip()
-        save_json(WORLD_SETTING_JSON, data)
+        save_json(self._world_file, data)
         self._status_var.set("保存しました")
         self.after(3_000, lambda: self._status_var.set(""))
 
     def on_show(self) -> None:
+        self.load()
+
+    def on_system_changed(self, entry) -> None:
+        """サイドバーでシステムが切り替わった際に呼ばれる。"""
+        self._world_file = entry.world_setting_file
+        self._system_name = entry.label
+        self._system_banner_var.set(f"現在のシステム: {entry.label}")
         self.load()
 
 
@@ -1832,7 +2247,7 @@ class WorldView(ctk.CTkFrame):
 # プロンプトダイアログ（tk.Toplevel 流用）
 # ─────────────────────────────────────────────────────────────────
 
-class PromptDialog(tk.Toplevel):
+class PromptDialog(ctk.CTkToplevel):
     def __init__(self, parent, template_id: str | None = None,
                  template_data: dict | None = None, existing_ids: list | None = None):
         super().__init__(parent)
@@ -1841,56 +2256,263 @@ class PromptDialog(tk.Toplevel):
         self.existing_ids = existing_ids or []
         self.orig_id = template_id
         self.template_data = template_data or {}
+        self._gen_busy = False
         self.title("プロンプト編集" if self.is_edit else "プロンプト新規作成")
-        self.geometry("640x640")
-        self.grab_set()
+        self.configure(fg_color=AppTheme.BG)
+        self.geometry("760x720")
+        self.transient(parent)
+        self.after(50, self.grab_set)
         self._build_ui()
         self._load_data()
         self.update_idletasks()
-        px = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
-        py = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{px}+{py}")
+        try:
+            px = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+            py = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+            self.geometry(f"+{max(0, px)}+{max(0, py)}")
+        except Exception:
+            pass
 
     def _build_ui(self):
-        pad = {"padx": 12, "pady": 4}
-        frame = ttk.Frame(self, padding=16)
-        frame.pack(fill=tk.BOTH, expand=True)
-        frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="テンプレートID").grid(row=0, column=0, sticky="w", **pad)
+        root = ctk.CTkScrollableFrame(self, fg_color=AppTheme.BG)
+        root.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+
+        # ── AI 自動生成パネル ──
+        auto = ctk.CTkFrame(root, fg_color=AppTheme.SURFACE, corner_radius=8)
+        auto.pack(fill="x", padx=4, pady=(4, 8))
+        ctk.CTkLabel(
+            auto, text="🤖 AI でプロンプトを自動生成",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=12, weight="bold"),
+            text_color=AppTheme.TEXT_HEAD,
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            auto, text="キャラクター像や役割のコンセプトを入力 → AIが system / instructions を作成します",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        self._gen_input = ctk.CTkTextbox(
+            auto, height=70,
+            fg_color="#1a1a1a", text_color=AppTheme.TEXT, wrap="word",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        self._gen_input.pack(fill="x", padx=12, pady=(0, 6))
+        self._gen_input.insert("0.0", "例: 冷静沈着な戦術アナリストのGM、プレイヤーへ淡々とヒントを出す")
+
+        gen_row = ctk.CTkFrame(auto, fg_color="transparent")
+        gen_row.pack(fill="x", padx=12, pady=(0, 10))
+        self._gen_btn = ctk.CTkButton(
+            gen_row, text="AIで生成", width=120, height=30,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            command=self._on_auto_generate,
+        )
+        self._gen_btn.pack(side="left")
+        self._gen_status_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            gen_row, textvariable=self._gen_status_var,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(side="left", padx=10)
+
+        # ── フォーム ──
+        form = ctk.CTkFrame(root, fg_color=AppTheme.SURFACE, corner_radius=8)
+        form.pack(fill="x", padx=4, pady=(0, 8))
+
+        ctk.CTkLabel(
+            form, text="テンプレートID",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=12, pady=(10, 2))
         self.var_id = tk.StringVar()
-        self.entry_id = ttk.Entry(frame, textvariable=self.var_id, width=35)
-        self.entry_id.grid(row=0, column=1, sticky="ew", **pad)
+        self.entry_id = ctk.CTkEntry(
+            form, textvariable=self.var_id,
+            fg_color="#1a1a1a", border_color="#333333",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        self.entry_id.pack(fill="x", padx=12, pady=(0, 8))
         if self.is_edit:
-            self.entry_id.config(state="disabled")
-        ttk.Label(frame, text="System Prompt").grid(row=1, column=0, sticky="nw", **pad)
-        self.text_system = scrolledtext.ScrolledText(frame, width=45, height=8, font=("", 10), wrap=tk.WORD)
-        self.text_system.grid(row=1, column=1, sticky="ew", **pad)
-        ttk.Label(frame, text="Instructions").grid(row=2, column=0, sticky="nw", **pad)
-        self.text_instructions = scrolledtext.ScrolledText(frame, width=45, height=4, font=("", 10), wrap=tk.WORD)
-        self.text_instructions.grid(row=2, column=1, sticky="ew", **pad)
-        param_frame = ttk.LabelFrame(frame, text="LLMパラメータ", padding=8)
-        param_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=8, padx=12)
-        ttk.Label(param_frame, text="Temperature").grid(row=0, column=0, sticky="w", padx=8)
+            self.entry_id.configure(state="disabled")
+
+        ctk.CTkLabel(
+            form, text="System Prompt",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=12, pady=(4, 2))
+        self.text_system = ctk.CTkTextbox(
+            form, height=170,
+            fg_color="#1a1a1a", text_color=AppTheme.TEXT, wrap="word",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        self.text_system.pack(fill="x", padx=12, pady=(0, 8))
+
+        ctk.CTkLabel(
+            form, text="Instructions",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=12, pady=(4, 2))
+        self.text_instructions = ctk.CTkTextbox(
+            form, height=110,
+            fg_color="#1a1a1a", text_color=AppTheme.TEXT, wrap="word",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        self.text_instructions.pack(fill="x", padx=12, pady=(0, 10))
+
+        # ── LLM パラメータ ──
+        params = ctk.CTkFrame(root, fg_color=AppTheme.SURFACE, corner_radius=8)
+        params.pack(fill="x", padx=4, pady=(0, 8))
+        ctk.CTkLabel(
+            params, text="LLMパラメータ",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            text_color=AppTheme.TEXT_HEAD,
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        tmp_row = ctk.CTkFrame(params, fg_color="transparent")
+        tmp_row.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(
+            tmp_row, text="Temperature",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT,
+            width=100, anchor="w",
+        ).pack(side="left")
         self.var_temp = tk.DoubleVar(value=0.7)
-        ttk.Spinbox(param_frame, textvariable=self.var_temp, from_=0.0, to=1.0,
-                    increment=0.05, format="%.2f", width=8).grid(row=0, column=1, sticky="w", padx=8)
-        ttk.Label(param_frame, text="Max Tokens").grid(row=0, column=2, sticky="w", padx=8)
+        self._temp_value_var = tk.StringVar(value="0.70")
+        slider = ctk.CTkSlider(
+            tmp_row, from_=0.0, to=1.0, number_of_steps=20,
+            variable=self.var_temp,
+            button_color=AppTheme.ACCENT, progress_color=AppTheme.ACCENT,
+            command=lambda v: self._temp_value_var.set(f"{float(v):.2f}"),
+        )
+        slider.pack(side="left", expand=True, fill="x", padx=8)
+        ctk.CTkLabel(
+            tmp_row, textvariable=self._temp_value_var,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT, width=50,
+        ).pack(side="left")
+
+        tok_row = ctk.CTkFrame(params, fg_color="transparent")
+        tok_row.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(
+            tok_row, text="Max Tokens",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT,
+            width=100, anchor="w",
+        ).pack(side="left")
         self.var_tokens = tk.IntVar(value=200)
-        ttk.Spinbox(param_frame, textvariable=self.var_tokens, from_=50, to=8000,
-                    increment=10, width=8).grid(row=0, column=3, sticky="w", padx=8)
-        btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=12)
-        ttk.Button(btn_frame, text="保存", command=self._on_save, width=12).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_frame, text="キャンセル", command=self.destroy, width=12).pack(side=tk.LEFT, padx=8)
+        tok_entry = ctk.CTkEntry(
+            tok_row, textvariable=self.var_tokens, width=100,
+            fg_color="#1a1a1a", border_color="#333333",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        )
+        tok_entry.pack(side="left", padx=8)
+        ctk.CTkLabel(
+            tok_row, text="（50〜8000 推奨）",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(side="left")
+
+        # ── ボタン行（スクロール外に固定） ──
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=12)
+        ctk.CTkButton(
+            btn_row, text="保存", width=120, height=34,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            command=self._on_save,
+        ).pack(side="right", padx=4)
+        ctk.CTkButton(
+            btn_row, text="キャンセル", width=120, height=34,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11),
+            command=self.destroy,
+        ).pack(side="right", padx=4)
 
     def _load_data(self):
         if not self.template_data:
             return
         self.var_id.set(self.orig_id or "")
-        self.text_system.insert("1.0", self.template_data.get("system", ""))
-        self.text_instructions.insert("1.0", self.template_data.get("instructions", ""))
-        self.var_temp.set(self.template_data.get("temperature", 0.7))
-        self.var_tokens.set(self.template_data.get("max_tokens", 200))
+        self.text_system.insert("0.0", self.template_data.get("system", ""))
+        self.text_instructions.insert("0.0", self.template_data.get("instructions", ""))
+        temp = float(self.template_data.get("temperature", 0.7))
+        self.var_temp.set(temp)
+        self._temp_value_var.set(f"{temp:.2f}")
+        self.var_tokens.set(int(self.template_data.get("max_tokens", 200)))
+
+    def _on_auto_generate(self) -> None:
+        if self._gen_busy:
+            return
+        concept = self._gen_input.get("0.0", "end").strip()
+        if not concept or concept.startswith("例:"):
+            messagebox.showwarning("入力不足", "コンセプトを入力してください。", parent=self)
+            return
+
+        self._gen_busy = True
+        self._gen_btn.configure(state="disabled", text="生成中...")
+        self._gen_status_var.set("LM-Studio に問い合わせ中...")
+
+        def run():
+            try:
+                sys.path.insert(0, str(CORE_DIR))
+                from lm_client import LMClient
+                client = LMClient()
+                if not client.is_server_running_sync():
+                    _post_to_main(lambda: self._gen_finish_fail("LM-Studio が起動していません"))
+                    return
+                try:
+                    from persona_builder import PersonaBuilder
+                    builder = PersonaBuilder(client)
+                    import asyncio
+                    persona = asyncio.run(builder.build_from_concept(concept))
+                    system_txt = getattr(persona, "system_prompt", "") or ""
+                    instr_txt = (
+                        getattr(persona, "persona_summary", None)
+                        or getattr(persona, "instructions", None)
+                        or ""
+                    )
+                except Exception:
+                    # PersonaBuilder が使えない場合はフォールバックで LLM を直接叩く
+                    sys_p = (
+                        "あなたはTRPG向けキャラクター/GMのシステムプロンプト設計者です。"
+                        "与えられたコンセプトを基に、厳密なJSONで"
+                        '{"system":"...","instructions":"..."} だけを返してください。'
+                        "system はキャラの口調・役割・禁則を含む本体プロンプト。"
+                        "instructions はセッション毎に注入する補助指示（短く）。"
+                    )
+                    user_p = f"コンセプト: {concept}"
+                    result, _ = client.generate_response_sync(
+                        system_prompt=sys_p, user_message=user_p,
+                        temperature=0.5, max_tokens=1200,
+                    )
+                    data = parse_llm_json_robust(result or "")
+                    system_txt = data.get("system", "")
+                    instr_txt = data.get("instructions", "")
+
+                if not system_txt:
+                    _post_to_main(lambda: self._gen_finish_fail("AIからの応答が空でした"))
+                    return
+                _post_to_main(lambda s=system_txt, i=instr_txt: self._gen_finish_ok(s, i))
+            except Exception as e:
+                _post_to_main(lambda err=e: self._gen_finish_fail(f"例外: {err}"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _gen_finish_ok(self, system_prompt: str, instructions: str) -> None:
+        self._gen_busy = False
+        self._gen_btn.configure(state="normal", text="AIで生成")
+        self.text_system.delete("0.0", "end")
+        self.text_system.insert("0.0", system_prompt)
+        if instructions:
+            self.text_instructions.delete("0.0", "end")
+            self.text_instructions.insert("0.0", instructions)
+        self.var_temp.set(0.7)
+        self._temp_value_var.set("0.70")
+        self.var_tokens.set(500)
+        self._gen_status_var.set("✓ 生成完了")
+        self.after(4_000, lambda: self._gen_status_var.set(""))
+
+    def _gen_finish_fail(self, message: str) -> None:
+        self._gen_busy = False
+        self._gen_btn.configure(state="normal", text="AIで生成")
+        self._gen_status_var.set(f"❌ {message}")
 
     def _on_save(self):
         tmpl_id = self.var_id.get().strip()
@@ -1898,12 +2520,16 @@ class PromptDialog(tk.Toplevel):
             return messagebox.showerror("エラー", "IDは英数字と_のみ可能", parent=self)
         if not self.is_edit and tmpl_id in self.existing_ids:
             return messagebox.showerror("エラー", "重複しています", parent=self)
+        try:
+            tokens = int(self.var_tokens.get())
+        except Exception:
+            return messagebox.showerror("エラー", "Max Tokens は整数", parent=self)
         self.result = {
             "id": tmpl_id,
-            "system": self.text_system.get("1.0", tk.END).strip(),
-            "instructions": self.text_instructions.get("1.0", tk.END).strip(),
+            "system": self.text_system.get("0.0", "end").strip(),
+            "instructions": self.text_instructions.get("0.0", "end").strip(),
             "temperature": float(self.var_temp.get()),
-            "max_tokens": int(self.var_tokens.get()),
+            "max_tokens": tokens,
         }
         self.destroy()
 
@@ -2260,7 +2886,7 @@ class AIConfigView(ctk.CTkFrame):
         self._gen_output.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
     def _gen_start(self) -> None:
-        if not self._lm_client.is_server_running():
+        if not self._lm_client.is_server_running_sync():
             messagebox.showerror("エラー", "LM-Studioが起動していません。",
                                  parent=self.winfo_toplevel())
             return
@@ -2285,7 +2911,7 @@ class AIConfigView(ctk.CTkFrame):
             )
             user_msg = f"以下の要望に合うデータを生成してください。\n要望: {user_req}"
             try:
-                result, _ = self._lm_client.generate_response(
+                result, _ = self._lm_client.generate_response_sync(
                     system_prompt=sys_prompt, user_message=user_msg,
                     temperature=0.4, max_tokens=8192, timeout=None,
                 )
@@ -2752,9 +3378,14 @@ class TacticalAILauncherV2(ctk.CTk):
         self._views: dict[str, ctk.CTkFrame] = {}
         self._current_view: str | None = None
 
+        # TRPGシステムレジストリ
+        from system_registry import SystemRegistry
+        self._system_registry = SystemRegistry(CONFIGS_DIR)
+
         self._build_layout()
         self._init_views()
         self._load_addon_sidebar_slots()
+        self._populate_system_selector()
         self._show_view("home")
         self.status_bar.start_polling()
         self.after(40, self._drain_ui_queue)
@@ -2767,7 +3398,11 @@ class TacticalAILauncherV2(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
 
         # サイドバー
-        self.sidebar = Sidebar(self, on_nav_click=self._show_view)
+        self.sidebar = Sidebar(
+            self,
+            on_nav_click=self._show_view,
+            on_system_change=self._on_system_change,
+        )
         self.sidebar.grid(row=0, column=0, sticky="nsw")
 
         # コンテンツエリア
@@ -2796,6 +3431,30 @@ class TacticalAILauncherV2(ctk.CTk):
         on_show = getattr(self._views[view_key], "on_show", None)
         if callable(on_show):
             on_show()
+
+    def _populate_system_selector(self) -> None:
+        """サイドバーのシステムセレクタに選択肢を流し込む。"""
+        entries = self._system_registry.list_systems()
+        active = self._system_registry.get_active()
+        self.sidebar.populate_systems(entries, active.id)
+        self._propagate_system_to_views(active)
+
+    def _on_system_change(self, system_id: str) -> None:
+        try:
+            entry = self._system_registry.set_active(system_id)
+        except KeyError:
+            return
+        self._propagate_system_to_views(entry)
+
+    def _propagate_system_to_views(self, entry) -> None:
+        """各ビューに新しい SystemEntry を伝搬する。"""
+        for view in self._views.values():
+            cb = getattr(view, "on_system_changed", None)
+            if callable(cb):
+                try:
+                    cb(entry)
+                except Exception as e:
+                    print(f"[launcher_v2] on_system_changed エラー: {e}")
 
     def _load_addon_sidebar_slots(self) -> None:
         """有効なアドオンの GUI タブをサイドバーに動的追加"""
