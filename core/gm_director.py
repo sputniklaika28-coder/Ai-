@@ -38,6 +38,7 @@ from core.schemas import (
 if TYPE_CHECKING:
     from core.combat_engine import CombatEngine
     from core.lm_client import LMClient
+    from core.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,9 @@ class GMDirectorConfig:
     auto_extract_entities: bool = True
     """True の場合、ナレーション後にエンティティを自動抽出・登録する。"""
 
+    inject_memory: bool = True
+    """True の場合、MemoryManager の会話履歴をナレーションプロンプトに注入する。"""
+
     max_recent_events: int = 5
     """コンテキストに含める直近イベント数。"""
 
@@ -185,11 +189,13 @@ class GMDirector:
         entity_tracker: EntityTracker,
         combat_engine: "CombatEngine | None" = None,
         config: GMDirectorConfig | None = None,
+        memory_manager: "MemoryManager | None" = None,
     ) -> None:
         self._lm = lm_client
         self._state = game_state
         self._entities = entity_tracker
         self._config = config or GMDirectorConfig()
+        self._memory = memory_manager
         self._recent_events: list[str] = []
 
         # CombatEngine は遅延初期化（GameState は既に存在する）
@@ -205,6 +211,10 @@ class GMDirector:
             from core.combat_engine import CombatEngine
             self._engine = CombatEngine(self._state)
         return self._engine
+
+    def set_memory_manager(self, memory_manager: "MemoryManager") -> None:
+        """MemoryManager を後から注入する（遅延初期化用）。"""
+        self._memory = memory_manager
 
     # ──────────────────────────────────
     # メイン API
@@ -303,6 +313,11 @@ class GMDirector:
             entity_summary = self._entities.context_summary(max_per_type=4)
             if entity_summary:
                 parts.append(entity_summary)
+
+        if self._config.inject_memory and self._memory is not None:
+            memory_context = self._memory.get_context_window()
+            if memory_context:
+                parts.append(memory_context)
 
         if self._recent_events:
             parts.append("【直近のイベント】")

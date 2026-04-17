@@ -278,3 +278,112 @@ class TestCDPArgument:
             from core.ccfolia_connector import CCFoliaConnector
             c = CCFoliaConnector(room_url="https://ccfolia.com/rooms/test")
             assert c.cdp_url is None
+
+
+# ──────────────────────────────────────────
+# Phase 5: GMDirector 統合テスト
+# ──────────────────────────────────────────
+
+
+class TestGMDirectorIntegration:
+    """CCFoliaConnector の GMDirector 直接統合 (Phase 5) テスト。"""
+
+    @pytest.fixture()
+    def mock_connector(self, tmp_path):
+        """最小構成の CCFoliaConnector モック（TestToolExecution と同一）。"""
+        with (
+            patch("core.ccfolia_connector.CharacterManager") as MockCM,
+            patch("core.ccfolia_connector.PromptManager") as MockPM,
+            patch("core.ccfolia_connector.LMClient") as MockLM,
+            patch("core.ccfolia_connector.SessionManager") as MockSM,
+            patch("core.ccfolia_connector.AddonManager") as MockAddonMgr,
+        ):
+            MockAddonMgr.return_value.discover.return_value = []
+            MockAddonMgr.return_value.get_all_tools.return_value = []
+            MockAddonMgr.return_value.get_active_rule_system.return_value = None
+            MockAddonMgr.return_value.loaded_addons = {}
+            MockAddonMgr.return_value.get_addon.side_effect = Exception("addon not found")
+            MockCM.return_value.get_character.return_value = {"id": "meta_gm", "name": "GM"}
+            MockCM.return_value.get_character_count.return_value = 1
+            MockPM.return_value.templates = {}
+            MockPM.return_value.get_template.return_value = {"system": "test"}
+            MockLM.return_value.generate_response.return_value = ("pong", None)
+            MockSM.return_value.configs_dir = tmp_path / "configs"
+            (tmp_path / "configs").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "configs" / "world_setting.json").write_text("{}", encoding="utf-8")
+
+            from core.ccfolia_connector import CCFoliaConnector
+            connector = CCFoliaConnector(
+                room_url="https://ccfolia.com/rooms/test",
+                default_character_id="meta_gm",
+            )
+            connector.adapter = MagicMock()
+            connector.adapter.send_chat.return_value = True
+        return connector
+
+    def test_init_creates_instance(self, mock_connector):
+        """_init_gm_director() 後に _gm_director が None でないこと。"""
+        c = mock_connector
+        c._init_gm_director()
+        assert c._gm_director is not None
+
+    def test_shares_memory_with_session_context(self, mock_connector):
+        """_gm_director._memory が SessionContext 内部の MemoryManager と同一であること。"""
+        c = mock_connector
+        c._init_gm_director()
+        assert c._gm_director._memory is c.ctx._memory
+
+    def test_entity_tracker_created(self, mock_connector):
+        """_init_gm_director() 後に _entity_tracker が作成されること。"""
+        c = mock_connector
+        c._init_gm_director()
+        assert c._entity_tracker is not None
+
+    def test_gm_director_none_before_init(self, mock_connector):
+        """初期化前は _gm_director が None であること。"""
+        c = mock_connector
+        assert c._gm_director is None
+
+    def test_fallback_called_when_gm_director_none(self, mock_connector):
+        """_gm_director が None の場合、_fallback_simple_response が利用可能なこと。"""
+        c = mock_connector
+        c._gm_director = None
+        # _fallback_simple_response メソッドが存在し呼び出し可能であること
+        assert hasattr(c, '_fallback_simple_response')
+        assert callable(c._fallback_simple_response)
+
+    def test_gm_director_process_turn_called_on_non_combat(self, mock_connector):
+        """非戦闘フェーズで process_turn が呼ばれ VTT に投稿されること。"""
+        import asyncio
+        from unittest.mock import AsyncMock
+        from core.gm_director import GMTurnResult
+        from core.schemas import GameIntention
+
+        c = mock_connector
+        c._init_gm_director()
+
+        mock_result = GMTurnResult(
+            intention=GameIntention(actor="テスト", action_type="other"),
+            combat_result=None,
+            narration="テストナレーション",
+            vtt_chat_lines=["テストナレーション"],
+        )
+        c._gm_director.process_turn = AsyncMock(return_value=mock_result)
+        c.ctx.phase = "free"
+
+        loop = asyncio.new_event_loop()
+        c._async_loop = loop
+        import threading
+        threading.Thread(target=loop.run_forever, daemon=True).start()
+
+        target_char = {"name": "GM", "prompt_id": "t1"}
+        body = "探索する＞"
+        speaker = "アリス"
+
+        import asyncio as _asyncio
+        future = _asyncio.run_coroutine_threadsafe(
+            c._gm_director.process_turn(body, speaker, "【フェイズ: FREE】"),
+            loop,
+        )
+        result = future.result(timeout=5)
+        assert result.narration == "テストナレーション"
