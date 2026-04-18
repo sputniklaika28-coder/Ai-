@@ -64,7 +64,10 @@ class BrowserUseVTTAdapter(BaseVTTAdapter):
     # ──────────────────────────────────────────
 
     def connect(self, room_url: str, headless: bool = False,
-                cdp_url: str | None = None) -> None:
+                cdp_url: str | None = None,
+                mode: str = "persistent",
+                profile_dir: str | None = None,
+                channel: str | None = None) -> None:
         """Browser Use でブラウザを起動し、VTT ルームに接続する。"""
         if cdp_url:
             logger.warning(

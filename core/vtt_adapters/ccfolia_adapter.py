@@ -21,6 +21,11 @@ except ModuleNotFoundError:
     _HAS_PLAYWRIGHT = False
     Browser = BrowserContext = Page = async_playwright = None  # type: ignore[assignment,misc]
 
+
+# 永続プロファイルのデフォルト格納先（クロスプラットフォーム）。
+# 初回はここにCCFoliaログインCookieが保存され、以降はログイン状態のまま再接続できる。
+DEFAULT_PERSISTENT_PROFILE = Path.home() / ".tactical_ai" / "ccfolia_profile"
+
 try:
     from core.vtt_adapters.base_adapter import BaseVTTAdapter
 except ModuleNotFoundError:
@@ -123,25 +128,132 @@ class CCFoliaAdapter(BaseVTTAdapter):
         logger.info("CDP経由でCCFoliaに接続: %s", self._page.url)
         print(f"   ✓ CDP経由でCCFoliaに接続: {self._page.url}")
 
-    async def connect(self, room_url: str, headless: bool = False,
-                      cdp_url: str | None = None) -> None:
-        """CCFolia ルームに接続する。
+    async def connect_persistent(
+        self,
+        room_url: str,
+        profile_dir: str | Path | None = None,
+        headless: bool = False,
+        channel: str | None = None,
+    ) -> None:
+        """永続プロファイルでCCFoliaに接続する（CDP不要）。
 
-        cdp_url が指定された場合は既存ブラウザにCDP接続し、
-        GMの認証・権限を引き継ぐ。指定なしの場合は新規Chromiumを起動する。
+        Playwright の launch_persistent_context を専用プロファイルディレクトリに対して
+        起動する。初回はユーザーがCCFoliaにログインする必要があるが、以降は
+        同プロファイルが Cookie/ストレージを保持するためログイン済み状態で再接続できる。
+        CDP (--remote-debugging-port) を要求しない。
+
+        Args:
+            room_url: CCFolia のルームURL。
+            profile_dir: プロファイル保存先（未指定時は DEFAULT_PERSISTENT_PROFILE）。
+            headless: ヘッドレスで起動するか。
+            channel: "chrome" / "msedge" 等（指定時はシステムインストール版ブラウザを使用）。
         """
-        if cdp_url:
-            await self.connect_cdp(cdp_url)
-            return
-
         if not _HAS_PLAYWRIGHT:
             raise ModuleNotFoundError(
                 "playwright パッケージが見つかりません。\n"
                 "  pip install playwright && python -m playwright install chromium\n"
                 "を実行してください。"
             )
-        profile_dir = Path.home() / "AppData/Local/TacticalAI/PlaywrightProfile_AI"
-        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        target_dir = Path(profile_dir) if profile_dir else DEFAULT_PERSISTENT_PROFILE
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # 同プロファイルで別プロセスが起動しているとロックされる
+        lock_file = target_dir / "SingletonLock"
+        if lock_file.exists():
+            logger.warning(
+                "プロファイルロックを検出: %s（前回のブラウザが残っている可能性があります）",
+                lock_file,
+            )
+
+        self._pw = await async_playwright().start()
+        launch_kwargs: dict = dict(
+            user_data_dir=str(target_dir),
+            headless=headless,
+            viewport={"width": 1280, "height": 900},
+            locale="ja-JP",
+            permissions=["clipboard-read", "clipboard-write"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--lang=ja",
+            ],
+        )
+        if channel:
+            launch_kwargs["channel"] = channel
+
+        try:
+            self._context = await self._pw.chromium.launch_persistent_context(
+                **launch_kwargs,
+            )
+        except Exception as e:
+            msg = str(e)
+            if "ProcessSingleton" in msg or "SingletonLock" in msg or "locked" in msg.lower():
+                raise RuntimeError(
+                    f"プロファイルが別プロセスにロックされています: {target_dir}\n"
+                    "既に起動中のブラウザを閉じてから再実行してください。"
+                ) from e
+            raise
+
+        self._browser = None  # 永続コンテキストでは browser は持たない
+
+        await self._context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
+        if self._context.pages:
+            self._page = self._context.pages[0]
+        else:
+            self._page = await self._context.new_page()
+
+        await self._page.goto(room_url, wait_until="domcontentloaded")
+        logger.info("永続プロファイルでCCFolia に接続: %s (profile=%s)", room_url, target_dir)
+        print(f"   ✓ 永続プロファイルでCCFoliaに接続: {room_url}")
+        print(f"     プロファイル: {target_dir}")
+
+        await self._post_connect_diagnostics()
+
+    async def connect(self, room_url: str, headless: bool = False,
+                      cdp_url: str | None = None,
+                      mode: str = "persistent",
+                      profile_dir: str | Path | None = None,
+                      channel: str | None = None) -> None:
+        """CCFolia ルームに接続する。
+
+        Args:
+            room_url: ルームURL。
+            headless: ヘッドレス起動するか（fresh モード時のみ有効）。
+            cdp_url: CDP URL（指定時は mode に関わらず CDP 優先）。
+            mode: "persistent" | "fresh" | "cdp"。
+                persistent → 永続プロファイル（デフォルト、CDP不要）
+                fresh → 毎回新規Chromium起動（従来動作）
+                cdp → 既存ChromeにCDP接続（--remote-debugging-port=9222 必須）
+            profile_dir: persistent モード時のプロファイル格納先。
+            channel: "chrome"/"msedge" 等（persistent モードで実ブラウザを使う場合）。
+        """
+        if cdp_url or mode == "cdp":
+            if not cdp_url:
+                cdp_url = "http://localhost:9222"
+            await self.connect_cdp(cdp_url)
+            return
+
+        if mode == "persistent":
+            await self.connect_persistent(
+                room_url,
+                profile_dir=profile_dir,
+                headless=headless,
+                channel=channel,
+            )
+            return
+
+        # mode == "fresh" — 従来の新規Chromium起動
+        if not _HAS_PLAYWRIGHT:
+            raise ModuleNotFoundError(
+                "playwright パッケージが見つかりません。\n"
+                "  pip install playwright && python -m playwright install chromium\n"
+                "を実行してください。"
+            )
 
         self._pw = await async_playwright().start()
 
@@ -169,7 +281,12 @@ class CCFoliaAdapter(BaseVTTAdapter):
         self._page = await self._context.new_page()
         await self._page.goto(room_url, wait_until="domcontentloaded")
 
-        logger.info("CCFolia に接続: %s", room_url)
+        logger.info("CCFolia に接続 (fresh): %s", room_url)
+
+        await self._post_connect_diagnostics()
+
+    async def _post_connect_diagnostics(self) -> None:
+        """接続後の診断処理（元の connect() 後半から抽出）。"""
 
         # チャット入力欄の出現を待機（最大30秒）
         try:
@@ -271,6 +388,9 @@ class CCFoliaAdapter(BaseVTTAdapter):
         try:
             if self._browser:
                 await self._browser.close()
+            elif self._context:
+                # 永続コンテキスト（browser なし）の場合は context 自体を閉じる
+                await self._context.close()
         except Exception:
             pass
         try:
@@ -370,8 +490,13 @@ class CCFoliaAdapter(BaseVTTAdapter):
             await self.page.keyboard.press("Escape")
             await self.page.wait_for_timeout(200)
 
-            # 駒選択（キャラクター切り替え）
-            await self._try_select_character(character_name)
+            # 駒選択（キャラクター切り替え＝チャットパレット切替）
+            selected = await self._try_select_character(character_name)
+            if not selected:
+                logger.info(
+                    "駒未選択のまま '%s' として投稿します（パレットは前回のキャラのまま）",
+                    character_name,
+                )
             await self.page.wait_for_timeout(200)
 
             # チャット入力欄を取得（可視の textarea を優先）
@@ -447,49 +572,121 @@ class CCFoliaAdapter(BaseVTTAdapter):
             return ta.as_element()
         return None
 
-    async def _try_select_character(self, character_name: str) -> None:
-        """駒選択UIでキャラクターを切り替える（失敗しても続行）。"""
-        try:
-            # より具体的なセレクタで駒選択UIを探す
-            piece_selectors = [
-                "[class*='MuiSelect']",
-                "div[role='button'][class*='MuiBox']",
-                "[class*='MuiBox'][aria-haspopup]",
-                _PIECE_SELECT,
-            ]
-            piece_select = None
-            for sel in piece_selectors:
-                candidates = await self.page.query_selector_all(sel)
-                for c in candidates:
-                    try:
-                        if await c.is_visible():
-                            piece_select = c
-                            break
-                    except Exception:
-                        continue
-                if piece_select:
-                    break
+    async def _try_select_character(self, character_name: str) -> bool:
+        """駒選択UIでキャラクターを切り替え、選択結果を検証する。
 
-            if not piece_select:
-                return
+        Returns:
+            True: 指定キャラを選択でき、チャットパレットが切り替わった。
+            False: 駒選択UIが見つからない、または一致する駒がなかった。
+        """
+        if not character_name:
+            return False
 
-            await piece_select.click(timeout=3000)
-            await self.page.wait_for_timeout(300)
-            items = await self.page.query_selector_all(_PIECE_ITEM)
-            for item in items:
-                item_text = await item.text_content() or ""
-                if character_name in item_text:
-                    await item.click(timeout=3000)
-                    await self.page.wait_for_timeout(200)
-                    return
-            # 見つからなかった場合はメニューを閉じる
-            await self.page.keyboard.press("Escape")
-        except Exception as e:
-            logger.debug("駒選択スキップ: %s", e)
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
             try:
-                await self.page.keyboard.press("Escape")
-            except Exception:
-                pass
+                piece_selectors = [
+                    "button[aria-haspopup='listbox']",
+                    "[class*='MuiSelect']",
+                    "div[role='button'][class*='MuiBox']",
+                    "[class*='MuiBox'][aria-haspopup]",
+                    _PIECE_SELECT,
+                ]
+                piece_select = None
+                for sel in piece_selectors:
+                    candidates = await self.page.query_selector_all(sel)
+                    for c in candidates:
+                        try:
+                            if await c.is_visible():
+                                piece_select = c
+                                break
+                        except Exception:
+                            continue
+                    if piece_select:
+                        break
+
+                if not piece_select:
+                    if attempt == max_attempts:
+                        logger.warning(
+                            "駒選択UIが見つかりません（チャットパレット切替不可）: %s",
+                            character_name,
+                        )
+                    return False
+
+                await piece_select.click(timeout=3000)
+                await self.page.wait_for_timeout(300)
+                items = await self.page.query_selector_all(_PIECE_ITEM)
+                clicked = False
+                for item in items:
+                    item_text = await item.text_content() or ""
+                    if character_name in item_text:
+                        await item.click(timeout=3000)
+                        await self.page.wait_for_timeout(250)
+                        clicked = True
+                        break
+
+                if not clicked:
+                    try:
+                        await self.page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    logger.warning(
+                        "駒 '%s' がCCFoliaの駒リストに見つかりません。"
+                        "CCFolia側に同名の駒を配置してください。",
+                        character_name,
+                    )
+                    return False
+
+                if await self._verify_selected_character(character_name):
+                    return True
+
+                if attempt < max_attempts:
+                    logger.debug(
+                        "駒選択の検証失敗、再試行 (%d/%d): %s",
+                        attempt, max_attempts, character_name,
+                    )
+                    continue
+
+                logger.warning(
+                    "駒選択の検証に失敗しました（チャットパレットが異なる可能性）: %s",
+                    character_name,
+                )
+                return False
+
+            except Exception as e:
+                logger.warning("駒選択エラー (%s): %s", character_name, e)
+                try:
+                    await self.page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                if attempt == max_attempts:
+                    return False
+        return False
+
+    async def _verify_selected_character(self, character_name: str) -> bool:
+        """現在選択中の駒名が期待値と一致するか確認する。"""
+        try:
+            selected_text = await self.page.evaluate(
+                """() => {
+                    const btn = document.querySelector("button[aria-haspopup='listbox']")
+                        || document.querySelector("[class*='MuiSelect']");
+                    if (btn) {
+                        const t = (btn.textContent || '').trim();
+                        if (t) return t;
+                    }
+                    const all = document.querySelectorAll(
+                        "[class*='MuiSelect'], div[role='button'][class*='MuiBox']"
+                    );
+                    for (const el of all) {
+                        const t = (el.textContent || '').trim();
+                        if (t) return t;
+                    }
+                    return '';
+                }"""
+            )
+            return bool(selected_text) and character_name in selected_text
+        except Exception:
+            return False
 
     async def get_chat_messages(self) -> list[dict]:
         """チャットメッセージ一覧を取得する。"""
