@@ -771,22 +771,43 @@ class HomeView(ctk.CTkFrame):
             width=160,
         ).grid(row=3, column=1, sticky="w", padx=(0, 12), pady=5)
 
-        # CDP オプション
-        cdp_row = ctk.CTkFrame(cfg_panel, fg_color="transparent")
-        cdp_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 8))
-        self._var_use_cdp = tk.BooleanVar(value=False)
-        self._cdp_check = ctk.CTkCheckBox(
-            cdp_row,
-            text="既存ブラウザに接続 (CDP)",
-            variable=self._var_use_cdp,
-            onvalue=True, offvalue=False,
-            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+        # ブラウザ接続モード（3択ラジオ）
+        mode_row = ctk.CTkFrame(cfg_panel, fg_color="transparent")
+        mode_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 2))
+        ctk.CTkLabel(
+            mode_row,
+            text="ブラウザ接続:",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
             text_color=AppTheme.TEXT,
-            fg_color=AppTheme.ACCENT,
-            command=self._toggle_cdp,
-        )
-        self._cdp_check.pack(side="left")
+        ).pack(side="left")
+        # persistent=既存ブラウザ(永続プロファイル,CDP不要) / fresh=新規Chromium / cdp=CDP接続
+        self._var_browser_mode = tk.StringVar(value="persistent")
+        for label, val in (
+            ("既存ブラウザ(永続プロファイル)", "persistent"),
+            ("新規Chromium起動", "fresh"),
+            ("CDP接続", "cdp"),
+        ):
+            ctk.CTkRadioButton(
+                mode_row,
+                text=label,
+                variable=self._var_browser_mode,
+                value=val,
+                font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+                text_color=AppTheme.TEXT,
+                fg_color=AppTheme.ACCENT,
+                command=self._on_browser_mode_change,
+            ).pack(side="left", padx=(8, 0))
+
+        # CDP URL 入力欄（cdp モード選択時のみ有効）
+        cdp_row = ctk.CTkFrame(cfg_panel, fg_color="transparent")
+        cdp_row.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 8))
         self._var_cdp_url = tk.StringVar(value="http://localhost:9222")
+        ctk.CTkLabel(
+            cdp_row,
+            text="CDP URL:",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(side="left")
         self._entry_cdp = ctk.CTkEntry(
             cdp_row,
             textvariable=self._var_cdp_url,
@@ -796,13 +817,16 @@ class HomeView(ctk.CTkFrame):
             fg_color="#1a1a1a",
             border_color="#444444",
         )
-        self._entry_cdp.pack(side="left", padx=(10, 0))
+        self._entry_cdp.pack(side="left", padx=(8, 0))
         ctk.CTkLabel(
             cdp_row,
-            text="  Chrome を --remote-debugging-port=9222 で起動",
+            text="  (CDP選択時のみ)Chrome を --remote-debugging-port=9222 で起動しておく",
             font=ctk.CTkFont(family="Yu Gothic UI", size=9),
             text_color=AppTheme.TEXT_DIM,
         ).pack(side="left")
+
+        # 後方互換: 既存コード参照用の BooleanVar（削除予定）
+        self._var_use_cdp = tk.BooleanVar(value=False)
 
         # 起動ボタン行
         btn_row = ctk.CTkFrame(right, fg_color="transparent")
@@ -1014,10 +1038,13 @@ class HomeView(ctk.CTkFrame):
             self._lm_status_var.set(" ✗ 未接続 — LM-Studio を起動してください")
             self._lm_status_lbl.configure(text_color=AppTheme.ERROR)
 
-    # ── CDP トグル ────────────────────────────────────────────────
+    # ── ブラウザモード切替 ────────────────────────────────────────
 
-    def _toggle_cdp(self) -> None:
-        if self._var_use_cdp.get():
+    def _on_browser_mode_change(self) -> None:
+        mode = self._var_browser_mode.get()
+        # 後方互換: use_cdp フラグも同期
+        self._var_use_cdp.set(mode == "cdp")
+        if mode == "cdp":
             self._entry_cdp.configure(state="normal")
         else:
             self._entry_cdp.configure(state="disabled")
@@ -1026,9 +1053,9 @@ class HomeView(ctk.CTkFrame):
 
     def _on_start(self) -> None:
         url = self._var_url.get().strip()
-        use_cdp = self._var_use_cdp.get()
+        mode = self._var_browser_mode.get()
 
-        if not url and not use_cdp:
+        if not url and mode != "cdp":
             messagebox.showwarning("入力エラー", "Room URL を入力してください",
                                    parent=self.winfo_toplevel())
             return
@@ -1040,14 +1067,15 @@ class HomeView(ctk.CTkFrame):
             )
             return
 
-        if use_cdp and not url:
+        if mode == "cdp" and not url:
             url = "https://ccfolia.com"
 
         default_char = self._var_default_char.get().strip() or "meta_gm"
         connector_path = CORE_DIR / "ccfolia_connector.py"
 
-        cmd = [PYTHON, str(connector_path), "--room", url, "--default", default_char]
-        if use_cdp:
+        cmd = [PYTHON, str(connector_path), "--room", url, "--default", default_char,
+               "--mode", mode]
+        if mode == "cdp":
             cdp_url = self._var_cdp_url.get().strip()
             if cdp_url:
                 cmd += ["--cdp", cdp_url]

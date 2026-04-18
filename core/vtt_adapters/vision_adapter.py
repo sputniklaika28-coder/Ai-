@@ -315,6 +315,9 @@ class VisionVTTAdapter(BaseVTTAdapter):
         room_url: str,
         headless: bool = False,
         cdp_url: str | None = None,
+        mode: str = "persistent",
+        profile_dir: str | None = None,
+        channel: str | None = None,
     ) -> None:
         """対象ウィンドウを検索してフォーカスする。
 

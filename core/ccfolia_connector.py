@@ -368,7 +368,7 @@ class SystemHealthStatus:
     """システム全体の稼働状態。"""
 
     vtt_connected: bool = False
-    vtt_mode: str = "disconnected"  # "disconnected" | "cdp" | "playwright" | "browser_use"
+    vtt_mode: str = "disconnected"  # "disconnected" | "persistent" | "playwright" | "cdp" | "browser_use" | "foundry" | "vision"
     lm_reachable: bool = False
     build_mode: str = "idle"  # "idle" | "building"
     room_url: str = ""
@@ -499,12 +499,19 @@ class CCFoliaConnector:
         poll_interval: float | None = None,
         use_browser_use: bool = False,
         cdp_url: str | None = None,
+        browser_mode: str = "persistent",
+        profile_dir: str | None = None,
+        browser_channel: str | None = None,
     ) -> None:
         self.room_url = room_url
         self.poll_interval = poll_interval or self.POLL_INTERVAL
         self.headless = headless
         self._use_browser_use = use_browser_use
         self.cdp_url = cdp_url
+        # CDP URL が明示指定されたら browser_mode に関わらず cdp 優先
+        self.browser_mode = "cdp" if cdp_url else browser_mode
+        self.profile_dir = profile_dir
+        self.browser_channel = browser_channel
 
         self.lm_client = LMClient()
         # 設定ファイルは常にリポジトリルート基準の絶対パスで解決する
@@ -626,12 +633,12 @@ class CCFoliaConnector:
             self._health.vtt_connected = True
             return
 
-        # ── ccfolia バックエンド（既存ロジック） ────────────────
-        if self.cdp_url:
-            # CDP接続: GMが既に開いているブラウザに接続（権限継承）
-            print(f"⏳ 既存ブラウザにCDP接続しています... ({self.cdp_url})")
+        # ── ccfolia バックエンド ────────────────
+        if self.browser_mode == "cdp":
+            cdp_url = self.cdp_url or "http://localhost:9222"
+            print(f"⏳ 既存ブラウザにCDP接続しています... ({cdp_url})")
             self.adapter = CCFoliaAdapter()
-            self._run_async(self.adapter.connect(self.room_url, cdp_url=self.cdp_url))
+            self._run_async(self.adapter.connect(self.room_url, cdp_url=cdp_url))
             self._health.vtt_mode = "cdp"
         elif self._use_browser_use:
             print("⏳ Browser Use でブラウザを起動しています...")
@@ -656,20 +663,39 @@ class CCFoliaConnector:
                 headless=self.headless,
                 lm_studio_url=cfg.get("lm_studio_url", "http://localhost:1234"),
             )
+            self._run_async(self.adapter.connect(self.room_url, headless=self.headless))
             self._health.vtt_mode = "browser_use"
-        else:
-            print("⏳ Playwright でブラウザを起動しています...")
+        elif self.browser_mode == "persistent":
+            print("⏳ 永続プロファイルでCCFoliaに接続しています（CDP不要）...")
             self.adapter = CCFoliaAdapter()
+            self._run_async(self.adapter.connect(
+                self.room_url,
+                headless=self.headless,
+                mode="persistent",
+                profile_dir=self.profile_dir,
+                channel=self.browser_channel,
+            ))
+            self._health.vtt_mode = "persistent"
+        else:
+            # fresh モード（従来の新規Chromium起動）
+            print("⏳ Playwright で新規ブラウザを起動しています...")
+            self.adapter = CCFoliaAdapter()
+            self._run_async(self.adapter.connect(
+                self.room_url,
+                headless=self.headless,
+                mode="fresh",
+            ))
             self._health.vtt_mode = "playwright"
 
-        if not self.cdp_url:
-            self._run_async(self.adapter.connect(self.room_url, headless=self.headless))
         self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
         self._health.vtt_connected = True
-        mode = {"cdp": "CDP", "browser_use": "Browser Use", "playwright": "Playwright"}.get(
-            self._health.vtt_mode, "Playwright"
-        )
-        print(f"✓ CCFoliaに接続 ({mode}): {self.room_url}")
+        mode_label = {
+            "cdp": "CDP",
+            "browser_use": "Browser Use",
+            "playwright": "Playwright(新規)",
+            "persistent": "Playwright(永続プロファイル)",
+        }.get(self._health.vtt_mode, self._health.vtt_mode)
+        print(f"✓ CCFoliaに接続 ({mode_label}): {self.room_url}")
 
     def _init_copilot(self) -> None:
         """SessionCoPilot を初期化する。"""
@@ -885,6 +911,46 @@ class CCFoliaConnector:
         if ok:
             self._sent_bodies.add(tagged[:80])
             self.ctx.add_message(character_name, tagged, is_ai=True)
+
+    # ──────────────────────────────────────────
+    # 発話者ルーティング
+    # ──────────────────────────────────────────
+
+    _RESPONDER_PATTERNS = (
+        re.compile(r"^\s*【([^】]{1,20})】"),
+        re.compile(r"^\s*「([^」]{1,20})」[：:]"),
+        re.compile(r"^\s*\[([^\]]{1,20})\]"),
+        re.compile(r"^\s*([^\s：:]{1,20})[：:]"),
+    )
+
+    def _resolve_responder(self, line: str) -> dict | None:
+        """ナレーション1行から発話者NPCを推定する。
+
+        行頭の「【名前】」「[名前]」「名前:」等のパターンを検出し、
+        characters.json の NPC (is_ai=True, enabled=True, role in {npc_manager, enemy})
+        と一致すればそのキャラクター辞書を返す。
+        一致しない場合は None（呼び出し側で meta_gm にフォールバック）。
+        """
+        if not line:
+            return None
+        hint: str | None = None
+        for pat in self._RESPONDER_PATTERNS:
+            m = pat.match(line)
+            if m:
+                hint = m.group(1).strip()
+                break
+        if not hint:
+            return None
+
+        for char in self.cm.characters.values():
+            if not char.get("enabled") or not char.get("is_ai"):
+                continue
+            if char.get("role") not in ("npc_manager", "enemy"):
+                continue
+            piece_name = char.get("ccfolia_piece_name") or char.get("name") or ""
+            if piece_name and (piece_name == hint or piece_name in hint or hint in piece_name):
+                return char
+        return None
 
     # ──────────────────────────────────────────
     # ツールディスパッチャー
@@ -1190,6 +1256,22 @@ class CCFoliaConnector:
                     trigger_kw = any(k in body for k in keywords) if keywords else False
                     print(f"   DEBUG: トリガー判定: '＞'={trigger_gt}, キーワード={trigger_kw}")
 
+                    # NPCキーワード一致 → 直接NPC応答（meta_gm を除く）
+                    matched_ids = self.detector.detect(body)
+                    npc_ids = [cid for cid in matched_ids if cid != "meta_gm"]
+                    if npc_ids:
+                        for npc_id in npc_ids:
+                            npc_char = self.cm.get_character(npc_id)
+                            if not npc_char:
+                                continue
+                            enriched_npc = (
+                                f"{self.ctx.get_context_summary()}\n\n"
+                                f"【今回反応すべき発言】\n[{speaker}]: {body}"
+                            )
+                            print(f"   🎭 NPC直接応答: {npc_char.get('name')} (id={npc_id})")
+                            self._run_agent_loop(npc_char, npc_id, enriched_npc)
+                        # NPC応答後も GM トリガー判定は続行（両立）
+
                     if trigger_gt or trigger_kw:
                         target_char = self.cm.get_character("meta_gm")
                         enriched = (
@@ -1210,8 +1292,9 @@ class CCFoliaConnector:
                                     )
                                 )
                                 for line in result.vtt_chat_lines:
-                                    self._post_system_message(target_char["name"], line)
-                                    print(f"   ✓ GMDirector応答: {line[:40]}...")
+                                    responder = self._resolve_responder(line) or target_char
+                                    self._post_system_message(responder["name"], line)
+                                    print(f"   ✓ GMDirector応答 [{responder['name']}]: {line[:40]}...")
 
                                 if self._entity_tracker and self._entity_path:
                                     try:
@@ -1316,12 +1399,32 @@ if __name__ == "__main__":
     parser.add_argument("--room", required=True)
     parser.add_argument("--default", default="meta_gm")
     parser.add_argument(
+        "--mode", choices=["persistent", "fresh", "cdp"], default="persistent",
+        help="ブラウザ接続モード: persistent=永続プロファイル(既定,CDP不要), "
+             "fresh=新規Chromium起動, cdp=既存ブラウザにCDP接続",
+    )
+    parser.add_argument(
         "--cdp", default=None,
-        help="CDP URL で既存ブラウザに接続 (例: http://localhost:9222)",
+        help="CDP URL で既存ブラウザに接続 (例: http://localhost:9222)。指定時は --mode cdp 相当",
+    )
+    parser.add_argument(
+        "--profile-dir", default=None,
+        help="persistent モード時のプロファイル保存先（未指定時は ~/.tactical_ai/ccfolia_profile）",
+    )
+    parser.add_argument(
+        "--channel", default=None,
+        help="ブラウザチャンネル (chrome / msedge など)。persistent モードで実インストール版Chromeを使う場合に指定",
     )
     args = parser.parse_args()
     try:
-        CCFoliaConnector(args.room, args.default, cdp_url=args.cdp).start()
+        CCFoliaConnector(
+            args.room,
+            args.default,
+            cdp_url=args.cdp,
+            browser_mode=args.mode,
+            profile_dir=args.profile_dir,
+            browser_channel=args.channel,
+        ).start()
     except Exception:
         print("\n" + "=" * 50)
         print("❌ 致命的エラーが発生しました:")

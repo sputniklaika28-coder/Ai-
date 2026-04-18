@@ -16,7 +16,10 @@ class BaseVTTAdapter(ABC):
 
     @abstractmethod
     async def connect(self, room_url: str, headless: bool = False,
-                      cdp_url: str | None = None) -> None:
+                      cdp_url: str | None = None,
+                      mode: str = "persistent",
+                      profile_dir: str | None = None,
+                      channel: str | None = None) -> None:
         """VTTルームに接続する。
 
         Args:
@@ -24,6 +27,12 @@ class BaseVTTAdapter(ABC):
             headless: ヘッドレスモードで起動するか。
             cdp_url: CDP (Chrome DevTools Protocol) エンドポイントURL。
                      指定時は既存ブラウザに接続し、GMの認証・権限を引き継ぐ。
+            mode: "persistent" | "fresh" | "cdp"。persistent が既定。
+                persistent → 永続プロファイルでログイン状態を保持（CDP不要）
+                fresh → 毎回新規ブラウザ起動
+                cdp → 既存ブラウザにCDP接続
+            profile_dir: persistent モード時のプロファイル保存先。
+            channel: "chrome"/"msedge" 等のブラウザチャンネル。
         """
 
     @abstractmethod
