@@ -43,8 +43,8 @@ PORTRAIT_STYLES: dict[str, dict[str, Any]] = {
             "low quality, blurry, deformed, extra limbs, "
             "realistic photo, 3d render, watermark, text, signature"
         ),
-        "width": 512,
-        "height": 768,
+        "width": 768,
+        "height": 1024,
     },
     "fantasy_portrait": {
         "prefix": (
@@ -56,8 +56,8 @@ PORTRAIT_STYLES: dict[str, dict[str, Any]] = {
             "low quality, blurry, deformed, modern clothes, "
             "watermark, text, jpeg artifacts"
         ),
-        "width": 512,
-        "height": 768,
+        "width": 768,
+        "height": 1024,
     },
     "dark_gothic": {
         "prefix": (
@@ -69,8 +69,8 @@ PORTRAIT_STYLES: dict[str, dict[str, Any]] = {
             "low quality, blurry, deformed, cute, bright colors, "
             "watermark, text"
         ),
-        "width": 512,
-        "height": 768,
+        "width": 768,
+        "height": 1024,
     },
     "token_simple": {
         "prefix": (
@@ -85,6 +85,30 @@ PORTRAIT_STYLES: dict[str, dict[str, Any]] = {
         "height": 512,
     },
 }
+
+
+def _style_dimensions(style: str) -> tuple[int, int]:
+    """スタイル名から (width, height) を返す。env オーバーライド優先。
+
+    COMFYUI_WIDTH / COMFYUI_HEIGHT が 0 より大きい場合に限り
+    token_simple 以外のスタイルで上書きする（正方形のトークンは保護）。
+    """
+    preset = PORTRAIT_STYLES.get(style, PORTRAIT_STYLES["anime_character"])
+    w = int(preset.get("width", 768))
+    h = int(preset.get("height", 1024))
+    if style == "token_simple":
+        return w, h
+    try:
+        from core.config import get_comfyui_height, get_comfyui_width
+        ow = get_comfyui_width()
+        oh = get_comfyui_height()
+        if ow > 0:
+            w = ow
+        if oh > 0:
+            h = oh
+    except ImportError:
+        pass
+    return w, h
 
 _DEFAULT_NEGATIVE = (
     "low quality, blurry, deformed, extra limbs, "
@@ -268,17 +292,33 @@ class PortraitPipeline:
         self,
         comfyui_client: Any,
         output_dir: str | Path = "generated_images",
-        default_steps: int = 20,
-        default_cfg: float = 7.0,
-        token_size: int = 256,
-        token_border_color: tuple[int, int, int] = (200, 160, 60),
+        default_steps: int | None = None,
+        default_cfg: float | None = None,
+        token_size: int | None = None,
+        token_border_color: tuple[int, int, int] | None = None,
     ) -> None:
         self._client = comfyui_client
         self._output_dir = Path(output_dir)
-        self._default_steps = default_steps
-        self._default_cfg = default_cfg
-        self._token_size = token_size
-        self._token_border_color = token_border_color
+
+        # 未指定の場合は core/config の env 値を使用（未導入時はハードコード既定にフォールバック）
+        try:
+            from core.config import (
+                get_comfyui_cfg,
+                get_comfyui_steps,
+                get_portrait_token_border,
+                get_portrait_token_size,
+            )
+            env_steps = get_comfyui_steps()
+            env_cfg = get_comfyui_cfg()
+            env_token_size = get_portrait_token_size()
+            env_token_border = get_portrait_token_border()
+        except ImportError:
+            env_steps, env_cfg, env_token_size, env_token_border = 20, 7.0, 256, (200, 160, 60)
+
+        self._default_steps = default_steps if default_steps is not None else env_steps
+        self._default_cfg = default_cfg if default_cfg is not None else env_cfg
+        self._token_size = token_size if token_size is not None else env_token_size
+        self._token_border_color = token_border_color if token_border_color is not None else env_token_border
 
         # サブディレクトリを作成
         (self._output_dir / "portraits").mkdir(parents=True, exist_ok=True)
@@ -381,13 +421,17 @@ class PortraitPipeline:
             extra_negative=extra_negative,
         )
 
-        # ComfyUI で生成
-        logger.info("portrait_pipeline: '%s' の画像生成開始...", character_name)
+        # ComfyUI で生成（env 上書き考慮の寸法を使用）
+        width, height = _style_dimensions(style)
+        logger.info(
+            "portrait_pipeline: '%s' の画像生成開始 (%dx%d)...",
+            character_name, width, height,
+        )
         gen_result = self._client.generate(
             prompt=positive,
             negative_prompt=negative,
-            width=preset.get("width", 512),
-            height=preset.get("height", 768),
+            width=width,
+            height=height,
             steps=self._default_steps,
             cfg=self._default_cfg,
         )

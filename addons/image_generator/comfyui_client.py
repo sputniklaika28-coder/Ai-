@@ -97,33 +97,91 @@ class ComfyUIConfig:
     default_cfg: float = 7.0
     timeout: int = 120
     poll_interval: float = 1.0
+    health_timeout: float = 3.0
 
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
 
+    @classmethod
+    def from_env(cls) -> "ComfyUIConfig":
+        """core/config.py の env getter から設定を構築する。
+
+        env が未設定なら従来のハードコード既定値で動作する（後方互換）。
+        ImportError 時は無引数コンストラクタにフォールバック。
+        """
+        try:
+            from core.config import (
+                get_comfyui_cfg,
+                get_comfyui_checkpoint,
+                get_comfyui_generation_timeout,
+                get_comfyui_height,
+                get_comfyui_host,
+                get_comfyui_port,
+                get_comfyui_steps,
+                get_comfyui_timeout,
+                get_comfyui_width,
+            )
+        except ImportError:
+            return cls()
+
+        ckpt = get_comfyui_checkpoint() or "sd_xl_base_1.0.safetensors"
+        width = get_comfyui_width() or 1024
+        height = get_comfyui_height() or 1024
+        return cls(
+            host=get_comfyui_host(),
+            port=get_comfyui_port(),
+            checkpoint=ckpt,
+            default_width=width,
+            default_height=height,
+            default_steps=get_comfyui_steps(),
+            default_cfg=get_comfyui_cfg(),
+            timeout=get_comfyui_generation_timeout(),
+            health_timeout=get_comfyui_timeout(),
+        )
+
 
 class ComfyUIClient:
     """ComfyUI REST API クライアント。"""
 
+    _AVAILABILITY_CACHE_SECONDS = 10.0
+
     def __init__(self, config: ComfyUIConfig | None = None):
         self.config = config or ComfyUIConfig()
         self._client_id = str(uuid.uuid4())
+        self._last_available_at: float = 0.0
+        self._checkpoint_cache: list[str] | None = None
 
     # ──────────────────────────────────────
     # ヘルスチェック
     # ──────────────────────────────────────
 
-    def is_available(self) -> bool:
-        """ComfyUI サーバーが起動しているか確認。"""
-        try:
-            r = requests.get(
-                f"{self.config.base_url}/system_stats",
-                timeout=3,
-            )
-            return r.status_code == 200
-        except (requests.ConnectionError, requests.Timeout):
-            return False
+    def is_available(self, *, retries: int = 1, use_cache: bool = True) -> bool:
+        """ComfyUI サーバーが起動しているか確認。
+
+        直近で成功した結果を ``_AVAILABILITY_CACHE_SECONDS`` 秒キャッシュし、
+        UI からの連打や同一フローでの重複問い合わせを抑える。
+        """
+        now = time.time()
+        if use_cache and (now - self._last_available_at) < self._AVAILABILITY_CACHE_SECONDS:
+            return True
+
+        timeout = max(0.5, float(getattr(self.config, "health_timeout", 3.0)))
+        attempts = max(1, retries + 1)
+        for attempt in range(attempts):
+            try:
+                r = requests.get(
+                    f"{self.config.base_url}/system_stats",
+                    timeout=timeout,
+                )
+                if r.status_code == 200:
+                    self._last_available_at = time.time()
+                    return True
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt < attempts - 1:
+                    time.sleep(0.5)
+                    continue
+        return False
 
     def get_system_stats(self) -> dict:
         """サーバーシステム統計を取得。"""
@@ -138,8 +196,10 @@ class ComfyUIClient:
             logger.warning("ComfyUI system_stats 取得失敗: %s", e)
             return {}
 
-    def get_checkpoints(self) -> list[str]:
+    def get_checkpoints(self, *, use_cache: bool = True) -> list[str]:
         """利用可能なチェックポイント一覧を取得。"""
+        if use_cache and self._checkpoint_cache is not None:
+            return self._checkpoint_cache
         try:
             r = requests.get(
                 f"{self.config.base_url}/object_info/CheckpointLoaderSimple",
@@ -147,15 +207,40 @@ class ComfyUIClient:
             )
             r.raise_for_status()
             data = r.json()
-            return (
+            names = (
                 data.get("CheckpointLoaderSimple", {})
                 .get("input", {})
                 .get("required", {})
                 .get("ckpt_name", [[]])[0]
             )
+            if isinstance(names, list):
+                self._checkpoint_cache = names
+                return names
+            return []
         except Exception as e:
             logger.warning("チェックポイント一覧の取得失敗: %s", e)
             return []
+
+    def resolve_checkpoint(self, preferred: str | None = None) -> str:
+        """指定チェックポイントが使えるか確認し、無ければ先頭を返す。
+
+        1. ``preferred`` が空でなく、一覧に含まれていればそのまま返す
+        2. 一覧が空（API 未応答 等）なら ``preferred`` または config 値をそのまま返す
+        3. それ以外は一覧の先頭を返す
+        """
+        target = (preferred or self.config.checkpoint or "").strip()
+        available = self.get_checkpoints()
+        if not available:
+            return target or "sd_xl_base_1.0.safetensors"
+        if target and target in available:
+            return target
+        fallback = available[0]
+        if target and target != fallback:
+            logger.warning(
+                "チェックポイント '%s' が見つからないため '%s' を使用します",
+                target, fallback,
+            )
+        return fallback
 
     # ──────────────────────────────────────
     # ワークフロー構築
@@ -178,8 +263,8 @@ class ComfyUIClient:
 
         workflow = copy.deepcopy(DEFAULT_WORKFLOW)
 
-        # チェックポイント
-        workflow["4"]["inputs"]["ckpt_name"] = checkpoint or self.config.checkpoint
+        # チェックポイント（指定なしまたは未登録なら自動解決）
+        workflow["4"]["inputs"]["ckpt_name"] = self.resolve_checkpoint(checkpoint)
 
         # 画像サイズ
         workflow["5"]["inputs"]["width"] = width or self.config.default_width

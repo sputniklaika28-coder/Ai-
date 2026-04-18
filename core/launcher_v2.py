@@ -18,6 +18,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
+from typing import Any
 
 import customtkinter as ctk
 import requests
@@ -143,7 +144,11 @@ def _load_character_thumbnail(image_path: str | Path | None, size: int = 48):
 
 
 def _load_character_portrait(image_path: str | Path | None, size: tuple[int, int] = (160, 220)):
-    """CharacterDialog 用の立ち絵プレビュー CTkImage を返す。"""
+    """CharacterDialog 用の立ち絵プレビュー CTkImage を返す。
+
+    size は最大外接サイズ。アスペクト比は元画像を維持し、内部で縮小して
+    枠内にフィット表示する（レターボックス）。
+    """
     resolved = _resolve_image_path(image_path)
     if resolved is None:
         return None
@@ -153,9 +158,139 @@ def _load_character_portrait(image_path: str | Path | None, size: tuple[int, int
         return None
     try:
         img = Image.open(resolved).convert("RGBA")
-        return ctk.CTkImage(light_image=img, dark_image=img, size=size)
+        img.thumbnail(size, Image.LANCZOS)
+        return ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# portrait_generator アドオンキャッシュ（連打時の再ロード回避）
+# ─────────────────────────────────────────────────────────────────
+
+_portrait_addon_cache: Any = None
+
+
+def _get_cached_portrait_addon() -> Any | None:
+    """portrait_generator アドオンを一度だけロードし、以降は使い回す。"""
+    global _portrait_addon_cache
+    if _portrait_addon_cache is not None:
+        return _portrait_addon_cache
+    try:
+        from core.addons.addon_base import AddonContext
+        from core.addons.addon_manager import AddonManager
+        from lm_client import LMClient
+    except Exception as e:
+        print(f"[launcher_v2] portrait addon のインポート失敗: {e}", file=sys.stderr)
+        return None
+    try:
+        mgr = AddonManager(addons_dir=ADDONS_DIR)
+        mgr.discover()
+        ctx = AddonContext(
+            adapter=None,
+            lm_client=LMClient(),
+            knowledge_manager=None,
+            session_manager=None,
+            character_manager=None,
+            root_dir=BASE_DIR,
+        )
+        mgr.load_enabled(["portrait_generator"], ctx)
+        addon = mgr.loaded_addons.get("portrait_generator")
+        if addon is not None:
+            _portrait_addon_cache = addon
+        return addon
+    except Exception as e:
+        print(f"[launcher_v2] portrait addon のロード失敗: {e}", file=sys.stderr)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# 反応キーワード自動抽出（オフライン・規則ベース）
+# ─────────────────────────────────────────────────────────────────
+
+# 汎用ストップワードと、一般的な助詞・動詞語尾など
+_KEYWORD_STOPWORDS: frozenset[str] = frozenset({
+    "ある", "いる", "する", "なる", "いう", "こと", "もの", "ため", "それ", "これ",
+    "そして", "しかし", "だから", "また", "でも", "やはり", "ほど", "よう", "ような",
+    "とても", "かなり", "すこし", "みたい", "みたいな", "だけ", "さえ", "ほか",
+    "ひとつ", "ふたつ", "みっつ", "その", "この", "あの", "どの",
+    "です", "ます", "だ", "である", "だった", "でした",
+    "the", "a", "an", "and", "or", "of", "to", "in", "is",
+})
+
+# 既知の属性的キーワード辞書（日本語）
+_KEYWORD_HINTS: tuple[str, ...] = (
+    # 髪色・髪型
+    "黒髪", "白髪", "金髪", "銀髪", "赤髪", "青髪", "茶髪", "緑髪", "紫髪",
+    "ロング", "ショート", "ポニーテール", "ツインテール", "ボブ",
+    # 目
+    "赤目", "青目", "金目", "翠眼", "碧眼",
+    # 職業・役割
+    "祓魔師", "神主", "巫女", "剣士", "騎士", "魔法使い", "メイジ", "僧侶", "盗賊",
+    "忍者", "狩人", "医者", "学者", "戦士", "賢者", "商人", "傭兵", "探偵", "警察官",
+    "軍人", "冒険者", "料理人", "錬金術師", "召喚師", "吟遊詩人", "海賊",
+    # 性格
+    "冷静", "無口", "温厚", "勇敢", "臆病", "陽気", "真面目", "優しい", "厳しい",
+    "気弱", "クール", "熱血", "天然", "ずる賢い", "忠実",
+    # 武器・装備
+    "刀", "剣", "弓", "銃", "拳銃", "杖", "槍", "斧", "短剣", "鎖鎌", "鞭",
+    "盾", "鎧", "ローブ", "マント", "和装", "着物", "軍服", "制服", "スーツ",
+    # その他
+    "少女", "少年", "老人", "青年", "女性", "男性", "子供", "大人",
+)
+
+
+def _suggest_keywords(text: str, existing: set[str] | None = None, limit: int = 10) -> list[str]:
+    """説明文から反応キーワード候補を抽出する（オフライン規則ベース）。
+
+    - 既知辞書 ``_KEYWORD_HINTS`` に含まれる語を優先抽出
+    - カタカナ連続ラン（2文字以上）を名前/固有名詞候補として追加
+    - 漢字連続ラン（2文字以上）も追加
+    - 英単語（3文字以上）も追加
+    - ``existing`` と ``_KEYWORD_STOPWORDS`` は除外
+    - 上限 ``limit`` 件
+    """
+    if not text:
+        return []
+    existing = {e.strip() for e in (existing or set()) if e and e.strip()}
+    found: list[str] = []
+    seen: set[str] = set(existing)
+
+    def _add(word: str, *, min_len: int = 2) -> None:
+        w = word.strip()
+        if not w or w in seen or w in _KEYWORD_STOPWORDS:
+            return
+        if len(w) < min_len:
+            return
+        seen.add(w)
+        found.append(w)
+
+    # 1. 既知辞書マッチ（最優先、1文字でも許可）
+    for hint in _KEYWORD_HINTS:
+        if hint in text:
+            _add(hint, min_len=1)
+            if len(found) >= limit:
+                return found[:limit]
+
+    # 2. カタカナ連続（2文字以上）
+    for m in re.finditer(r"[\u30A0-\u30FF\u31F0-\u31FFー]{2,}", text):
+        _add(m.group(0))
+        if len(found) >= limit:
+            return found[:limit]
+
+    # 3. 漢字連続（2文字以上、辞書未一致）
+    for m in re.finditer(r"[\u4E00-\u9FFF]{2,}", text):
+        _add(m.group(0))
+        if len(found) >= limit:
+            return found[:limit]
+
+    # 4. 英単語（3文字以上）
+    for m in re.finditer(r"[A-Za-z]{3,}", text):
+        _add(m.group(0).lower())
+        if len(found) >= limit:
+            return found[:limit]
+
+    return found[:limit]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1129,7 +1264,13 @@ class CharacterDialog(ctk.CTkToplevel):
             form, textvariable=self.var_keywords,
             fg_color="#1a1a1a", border_color="#333333",
             font=ctk.CTkFont(family="Yu Gothic UI", size=10),
-        ).pack(fill="x", padx=12, pady=(0, 6))
+        ).pack(fill="x", padx=12, pady=(0, 4))
+
+        # 説明から自動抽出したキーワード候補チップの格納フレーム
+        self._kw_suggest_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self._kw_suggest_frame.pack(fill="x", padx=12, pady=(0, 6))
+        self._kw_suggest_chips: list[Any] = []
+        self._kw_suggest_after_id: str | None = None
 
         _label("説明").pack(anchor="w", padx=12, pady=(4, 2))
         self.text_desc = ctk.CTkTextbox(
@@ -1138,6 +1279,7 @@ class CharacterDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(family="Yu Gothic UI", size=10),
         )
         self.text_desc.pack(fill="x", padx=12, pady=(0, 6))
+        self.text_desc.bind("<KeyRelease>", self._on_desc_changed)
 
         flags = ctk.CTkFrame(form, fg_color="transparent")
         flags.pack(fill="x", padx=12, pady=(4, 10))
@@ -1250,6 +1392,8 @@ class CharacterDialog(ctk.CTkToplevel):
         self.var_keywords.set(", ".join(self.char_data.get("keywords", [])))
         self.var_image_path.set(self.char_data.get("image_path", "") or "")
         self._refresh_portrait_preview()
+        # 既存の description からキーワード候補を初回生成
+        self.after(100, self._refresh_keyword_suggestions)
 
     def _refresh_portrait_preview(self) -> None:
         path = self.var_image_path.get().strip()
@@ -1307,34 +1451,24 @@ class CharacterDialog(ctk.CTkToplevel):
 
         def run():
             try:
-                from core.addons.addon_manager import AddonManager
-                from core.addons.addon_base import AddonContext, ToolExecutionContext
-                from lm_client import LMClient
-
-                mgr = AddonManager(addons_dir=ADDONS_DIR)
-                mgr.discover()
-                ctx = AddonContext(
-                    adapter=None,
-                    lm_client=LMClient(),
-                    knowledge_manager=None,
-                    session_manager=None,
-                    character_manager=None,
-                    root_dir=BASE_DIR,
-                )
-                mgr.load_enabled(["portrait_generator"], ctx)
-                addon = mgr.loaded_addons.get("portrait_generator")
+                addon = _get_cached_portrait_addon()
                 if addon is None:
                     _post_to_main(lambda: self._portrait_finish_fail("portrait_generator の読み込みに失敗しました"))
                     return
+                from core.addons.addon_base import ToolExecutionContext
 
                 tool_ctx = ToolExecutionContext(
                     char_name=name, tool_call_id="portrait_dialog",
                     adapter=None, connector=None,
                 )
+                kw_raw = self.var_keywords.get().strip() if hasattr(self, "var_keywords") else ""
+                keywords_list = [k.strip() for k in kw_raw.split(",") if k.strip()]
                 args = {
                     "character_id": char_id,
                     "character_name": name,
                     "description": description,
+                    "keywords": keywords_list,
+                    "style": "anime_character",
                 }
                 finished, result_json = addon.execute_tool(
                     "generate_character_portrait", args, tool_ctx,
@@ -1345,6 +1479,7 @@ class CharacterDialog(ctk.CTkToplevel):
                     result = {}
                 image_path = (
                     result.get("image_path")
+                    or result.get("portrait_path")
                     or result.get("path")
                     or result.get("file")
                 )
@@ -1352,7 +1487,14 @@ class CharacterDialog(ctk.CTkToplevel):
                     _post_to_main(lambda p=image_path: self._portrait_finish_ok(p))
                 else:
                     err = result.get("error") or "不明なエラー"
-                    _post_to_main(lambda e=err: self._portrait_finish_fail(f"生成失敗: {e}"))
+                    code = result.get("error_code") or ""
+                    label_map = {
+                        "comfyui_unavailable": "ComfyUI未接続",
+                        "character_not_found": "入力不足",
+                        "generation_failed": "生成失敗",
+                    }
+                    prefix = label_map.get(code, "生成失敗")
+                    _post_to_main(lambda e=err, p=prefix: self._portrait_finish_fail(f"{p}: {e}"))
             except Exception as e:
                 _post_to_main(lambda err=e: self._portrait_finish_fail(f"例外: {err}"))
 
@@ -1370,6 +1512,64 @@ class CharacterDialog(ctk.CTkToplevel):
         self._portrait_busy = False
         self._btn_generate_portrait.configure(state="normal", text="立ち絵を生成")
         self._portrait_status_var.set(f"❌ {message}")
+
+    # ── 反応キーワード候補チップ ─────────────────────────
+    def _on_desc_changed(self, event: Any = None) -> None:
+        """説明変更から 500ms デバウンスで候補更新をスケジュールする。"""
+        if self._kw_suggest_after_id is not None:
+            try:
+                self.after_cancel(self._kw_suggest_after_id)
+            except Exception:
+                pass
+        self._kw_suggest_after_id = self.after(500, self._refresh_keyword_suggestions)
+
+    def _refresh_keyword_suggestions(self) -> None:
+        """説明文から候補キーワードを抽出してチップで表示する。"""
+        self._kw_suggest_after_id = None
+        try:
+            text = self.text_desc.get("0.0", "end").strip()
+        except Exception:
+            return
+        existing_raw = self.var_keywords.get()
+        existing = {k.strip() for k in existing_raw.split(",") if k.strip()}
+        suggestions = _suggest_keywords(text, existing=existing, limit=10)
+
+        # 既存チップを破棄
+        for chip in self._kw_suggest_chips:
+            try:
+                chip.destroy()
+            except Exception:
+                pass
+        self._kw_suggest_chips = []
+        if not suggestions:
+            return
+
+        for kw in suggestions:
+            chip = ctk.CTkButton(
+                self._kw_suggest_frame,
+                text=f"+ {kw}",
+                width=0, height=22, corner_radius=11,
+                fg_color="#2b2b2b", hover_color="#3a3a3a",
+                text_color=AppTheme.TEXT,
+                font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+                command=lambda w=kw: self._append_keyword(w),
+            )
+            chip.pack(side="left", padx=2, pady=2)
+            self._kw_suggest_chips.append(chip)
+
+    def _append_keyword(self, keyword: str) -> None:
+        """候補チップのキーワードを反応キーワード欄に追加する（手入力は上書きしない）。"""
+        keyword = keyword.strip()
+        if not keyword:
+            return
+        current = self.var_keywords.get().strip()
+        items = [k.strip() for k in current.split(",") if k.strip()]
+        if keyword in items:
+            return
+        items.append(keyword)
+        self.var_keywords.set(", ".join(items))
+        # 追加後は候補を再計算（追加済みチップを除外するため）
+        self._refresh_keyword_suggestions()
 
     def _on_save(self):
         char_id = self.var_id.get().strip()

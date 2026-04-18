@@ -18,6 +18,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 保存ファイル名として許可する記号（英数字以外）
+_SAFE_FILENAME_EXTRA_CHARS = "-_（）"
+
 try:
     from core.addons.addon_base import AddonBase, AddonContext, ToolExecutionContext
     from core.persona_builder import PersonaBuilder, PersonaBuildResult
@@ -36,50 +39,86 @@ class PortraitGeneratorAddon(AddonBase):
     def __init__(self) -> None:
         self._persona_builder: PersonaBuilder | None = None
         self._pipeline: Any | None = None  # PortraitPipeline
+        self._client: Any | None = None  # ComfyUIClient
         self._output_dir: Path | None = None
         self._lm_client: Any | None = None
+        self._context: AddonContext | None = None
 
     # ──────────────────────────────────────
     # ライフサイクル
     # ──────────────────────────────────────
 
     def on_load(self, context: AddonContext) -> None:
+        self._context = context
         self._lm_client = context.lm_client
-        self._output_dir = context.root_dir / "generated_images"
+        self._output_dir = self._resolve_output_dir(context)
         self._persona_builder = PersonaBuilder(context.lm_client)
 
-        # PortraitPipeline の初期化（ComfyUI クライアントが必要）
-        self._pipeline = self._try_init_pipeline(context)
+        # ComfyUI 未起動でもロードは成功させ、実行時に再試行する
+        self._try_init_pipeline(context)
 
         logger.info(
             "PortraitGeneratorAddon: ロード完了 (pipeline=%s)",
-            "有効" if self._pipeline else "無効(ComfyUI未設定)",
+            "有効" if self._pipeline else "遅延初期化(ComfyUI未検出)",
         )
 
-    def _try_init_pipeline(self, context: AddonContext) -> Any | None:
-        """image_generator アドオンの ComfyUIClient を取得してパイプラインを初期化。"""
+    @staticmethod
+    def _resolve_output_dir(context: AddonContext) -> Path:
+        """PORTRAIT_OUTPUT_DIR を考慮して出力先を決定する。"""
+        try:
+            from core.config import get_portrait_output_dir
+            raw = get_portrait_output_dir()
+        except ImportError:
+            raw = "generated_images"
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = context.root_dir / candidate
+        return candidate
+
+    def _import_pipeline_classes(self) -> tuple[Any, Any, Any] | None:
+        """image_generator アドオンのクラス群を取得する。"""
         try:
             from addons.image_generator.comfyui_client import ComfyUIClient, ComfyUIConfig
             from addons.image_generator.portrait_pipeline import PortraitPipeline
-        except ModuleNotFoundError:
-            try:
-                import sys
-                sys.path.insert(0, str(context.root_dir))
-                from addons.image_generator.comfyui_client import ComfyUIClient, ComfyUIConfig
-                from addons.image_generator.portrait_pipeline import PortraitPipeline
-            except ImportError as e:
-                logger.warning("PortraitPipeline 初期化失敗 (image_generator 未導入): %s", e)
-                return None
-
-        client = ComfyUIClient(ComfyUIConfig())
-        if not client.is_available():
-            logger.info("PortraitGeneratorAddon: ComfyUI 未起動 → 画像生成機能は無効")
+            return ComfyUIClient, ComfyUIConfig, PortraitPipeline
+        except ImportError as e:
+            logger.warning("PortraitPipeline 初期化失敗 (image_generator 未導入): %s", e)
             return None
 
-        return PortraitPipeline(
-            comfyui_client=client,
-            output_dir=self._output_dir or "generated_images",
-        )
+    def _try_init_pipeline(self, context: AddonContext) -> Any | None:
+        """クライアント＋パイプラインを準備。ComfyUI 未起動時はクライアントだけ保持。"""
+        classes = self._import_pipeline_classes()
+        if classes is None:
+            return None
+        ComfyUIClient, ComfyUIConfig, PortraitPipeline = classes
+
+        if self._client is None:
+            self._client = ComfyUIClient(ComfyUIConfig.from_env())
+
+        if not self._client.is_available():
+            logger.info("PortraitGeneratorAddon: ComfyUI 未起動 → 呼び出し時に再試行")
+            self._pipeline = None
+            return None
+
+        if self._pipeline is None:
+            self._pipeline = PortraitPipeline(
+                comfyui_client=self._client,
+                output_dir=self._output_dir or Path("generated_images"),
+            )
+        return self._pipeline
+
+    def _get_pipeline(self) -> Any | None:
+        """実行時に遅延初期化＋再試行するためのアクセサ。"""
+        ctx = self._context
+        if ctx is None:
+            return self._pipeline
+        if self._pipeline is not None:
+            # 既存パイプラインは流用。ComfyUI の再起動に備え is_available を軽く確認
+            if self._client is not None and self._client.is_available():
+                return self._pipeline
+            # 応答しなくなった場合は捨てる
+            self._pipeline = None
+        return self._try_init_pipeline(ctx)
 
     def on_unload(self) -> None:
         self._persona_builder = None
@@ -127,7 +166,8 @@ class PortraitGeneratorAddon(AddonBase):
                 "function": {
                     "name": "generate_character_portrait",
                     "description": (
-                        "保存済みキャラクターの立ち絵とVTTトークン（円形PNG）を自動生成する。"
+                        "キャラクターの立ち絵とVTTトークン（円形PNG）を自動生成する。"
+                        "saved_pcs 未保存のキャラクターでも description/keywords を直接渡せる。"
                         "ComfyUI が起動している必要がある。"
                     ),
                     "parameters": {
@@ -135,7 +175,16 @@ class PortraitGeneratorAddon(AddonBase):
                         "properties": {
                             "character_name": {
                                 "type": "string",
-                                "description": "生成対象のキャラクター名（saved_pcs に存在すること）",
+                                "description": "生成対象のキャラクター名（保存されていればそれを使用、無ければ description から生成）",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "外見・特徴の説明文（未保存キャラクターの場合に使用。日本語可）",
+                            },
+                            "keywords": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "追加の英語キーワードリスト（省略可）",
                             },
                             "style": {
                                 "type": "string",
@@ -149,7 +198,7 @@ class PortraitGeneratorAddon(AddonBase):
                             },
                             "extra_keywords": {
                                 "type": "string",
-                                "description": "追加の英語プロンプトキーワード（省略可）",
+                                "description": "追加の英語プロンプト文字列（カンマ区切り、省略可）",
                             },
                         },
                         "required": ["character_name"],
@@ -259,52 +308,85 @@ class PortraitGeneratorAddon(AddonBase):
         args: dict,
         context: ToolExecutionContext,
     ) -> tuple[bool, str]:
-        if self._pipeline is None:
+        pipeline = self._get_pipeline()
+        if pipeline is None:
             return False, json.dumps({
-                "error": "ComfyUI が利用できません。起動していることを確認してください。",
+                "ok": False,
+                "error": "ComfyUI に接続できません。起動しているか .env の COMFYUI_HOST/COMFYUI_PORT を確認してください。",
+                "error_code": "comfyui_unavailable",
             }, ensure_ascii=False)
 
-        character_name = args.get("character_name", "")
+        character_name = (args.get("character_name") or "").strip()
         style = args.get("style", "anime_character")
-        extra_keywords = args.get("extra_keywords", "")
+        extra_keywords = args.get("extra_keywords", "") or ""
+        description = (args.get("description") or "").strip()
+        explicit_keywords = args.get("keywords") or []
+        if isinstance(explicit_keywords, str):
+            explicit_keywords = [k.strip() for k in explicit_keywords.split(",") if k.strip()]
 
-        # saved_pcs からキャラクターデータをロード
-        char_json = self._load_character(character_name, context)
+        # saved_pcs から優先的にロード
+        char_json = self._load_character(character_name, context) if character_name else None
+
+        # 未保存なら description / keywords から最小限の char_json を構築
         if char_json is None:
-            return False, json.dumps({
-                "error": f"キャラクター '{character_name}' が見つかりません",
-            }, ensure_ascii=False)
+            if not (description or explicit_keywords):
+                return False, json.dumps({
+                    "ok": False,
+                    "error": (
+                        f"キャラクター '{character_name}' が見つかりません。"
+                        "保存済みでない場合は description または keywords を渡してください。"
+                    ),
+                    "error_code": "character_not_found",
+                }, ensure_ascii=False)
+            fallback_name = character_name or "character"
+            char_json = {
+                "name": fallback_name,
+                "alias": "",
+                "_persona": {
+                    "portrait_keywords": list(explicit_keywords),
+                    "description": description,
+                },
+            }
+            character_name = fallback_name
 
-        # portrait_keywords を追加キーワードで拡張
-        extra_positive = extra_keywords if extra_keywords else ""
+        persona = char_json.setdefault("_persona", {})
+        keywords = list(persona.get("portrait_keywords") or [])
+        # 明示キーワードを優先し重複除去
+        for kw in explicit_keywords:
+            if kw and kw not in keywords:
+                keywords.append(kw)
+        if not keywords:
+            keywords = [character_name] if character_name else ["character"]
 
-        result = self._pipeline.generate_from_character_json(
-            character_json=char_json,
+        # description はプロンプト末尾に追加（短文なら）
+        extra_positive_parts = []
+        if extra_keywords:
+            extra_positive_parts.append(extra_keywords)
+        if description:
+            extra_positive_parts.append(description)
+        extra_positive = ", ".join(extra_positive_parts)
+
+        result = pipeline.generate_portrait(
+            character_name=character_name,
+            portrait_keywords=keywords,
             style=style,
             remove_bg=True,
             create_token=True,
+            extra_positive=extra_positive,
         )
-        if extra_positive:
-            # extra_keywords がある場合は直接 generate_portrait を呼ぶ
-            persona = char_json.get("_persona", {})
-            keywords = persona.get("portrait_keywords", [char_json.get("name", "character")])
-            result = self._pipeline.generate_portrait(
-                character_name=character_name,
-                portrait_keywords=keywords,
-                style=style,
-                remove_bg=True,
-                create_token=True,
-                extra_positive=extra_positive,
-            )
 
         if not result.success:
             return False, json.dumps({
+                "ok": False,
                 "error": result.error or "画像生成失敗",
+                "error_code": "generation_failed",
             }, ensure_ascii=False)
 
         return True, json.dumps({
+            "ok": True,
             "character_name": character_name,
             "portrait_path": result.portrait_path,
+            "image_path": result.portrait_path,  # launcher 互換エイリアス
             "token_path": result.token_path,
             "raw_path": result.raw_path,
             "background_removed": result.background_removed,
@@ -367,7 +449,9 @@ class PortraitGeneratorAddon(AddonBase):
             root = Path(__file__).resolve().parent.parent.parent
             save_dir = root / "configs" / "saved_pcs"
             save_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = "".join(c if c.isalnum() or c in "-_（）" else "_" for c in name)
+            safe_name = "".join(
+                c if c.isalnum() or c in _SAFE_FILENAME_EXTRA_CHARS else "_" for c in name
+            )
             save_path = save_dir / f"{safe_name}.json"
             save_path.write_text(
                 json.dumps(char_json, ensure_ascii=False, indent=2),
