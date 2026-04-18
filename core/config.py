@@ -214,3 +214,111 @@ def get_vision_vtt_max_steps() -> int:
         return max(1, int(os.getenv("VISION_VTT_MAX_STEPS", "6")))
     except ValueError:
         return 6
+
+
+# ──────────────────────────────────────────
+# ComfyUI / 立ち絵ジェネレーター設定
+# ──────────────────────────────────────────
+
+
+def get_comfyui_host() -> str:
+    """ComfyUI サーバーのホスト。既定 '127.0.0.1'。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("COMFYUI_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+
+def get_comfyui_port() -> int:
+    """ComfyUI サーバーのポート。既定 8188。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(1, int(os.getenv("COMFYUI_PORT", "8188")))
+    except ValueError:
+        return 8188
+
+
+def get_comfyui_timeout() -> float:
+    """is_available の HTTP タイムアウト秒。既定 3.0。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(0.5, float(os.getenv("COMFYUI_TIMEOUT", "3.0")))
+    except ValueError:
+        return 3.0
+
+
+def get_comfyui_checkpoint() -> str:
+    """利用するチェックポイント。空欄なら自動選択。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("COMFYUI_CHECKPOINT", "").strip()
+
+
+def get_comfyui_steps() -> int:
+    """KSampler ステップ数。既定 20。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(1, int(os.getenv("COMFYUI_STEPS", "20")))
+    except ValueError:
+        return 20
+
+
+def get_comfyui_cfg() -> float:
+    """CFG スケール。既定 7.0。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(0.0, float(os.getenv("COMFYUI_CFG", "7.0")))
+    except ValueError:
+        return 7.0
+
+
+def get_comfyui_width() -> int:
+    """生成画像のデフォルト幅。0 ならスタイル既定値を使用。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(0, int(os.getenv("COMFYUI_WIDTH", "0")))
+    except ValueError:
+        return 0
+
+
+def get_comfyui_height() -> int:
+    """生成画像のデフォルト高さ。0 ならスタイル既定値を使用。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(0, int(os.getenv("COMFYUI_HEIGHT", "0")))
+    except ValueError:
+        return 0
+
+
+def get_comfyui_generation_timeout() -> int:
+    """生成完了までの最大待機秒。既定 120。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(10, int(os.getenv("COMFYUI_GEN_TIMEOUT", "120")))
+    except ValueError:
+        return 120
+
+
+def get_portrait_output_dir() -> str:
+    """生成画像保存先ディレクトリ（プロジェクト相対 or 絶対）。既定 'generated_images'。"""
+    _vlm_agent_env_loaded()
+    return os.getenv("PORTRAIT_OUTPUT_DIR", "generated_images").strip() or "generated_images"
+
+
+def get_portrait_token_size() -> int:
+    """円形トークンの一辺ピクセル数。既定 256。"""
+    _vlm_agent_env_loaded()
+    try:
+        return max(32, int(os.getenv("PORTRAIT_TOKEN_SIZE", "256")))
+    except ValueError:
+        return 256
+
+
+def get_portrait_token_border() -> tuple[int, int, int]:
+    """トークン枠色 'R,G,B'。既定 200,160,60（ゴールド）。"""
+    _vlm_agent_env_loaded()
+    raw = os.getenv("PORTRAIT_TOKEN_BORDER", "200,160,60").strip()
+    try:
+        parts = [max(0, min(255, int(v))) for v in raw.split(",")]
+        if len(parts) == 3:
+            return (parts[0], parts[1], parts[2])
+    except ValueError:
+        pass
+    return (200, 160, 60)
