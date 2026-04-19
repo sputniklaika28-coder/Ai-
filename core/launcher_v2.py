@@ -1650,8 +1650,56 @@ class ActorsView(ctk.CTkFrame):
         self._saved_files: list[Path] = []
         self._last_json_raw: dict = {}
         self._characters_file: Path = CHARACTERS_JSON
+        self._char_service_cache = None
+        self._char_service_cache_key: tuple | None = None
         self._init_vars()
         self._build_ui()
+
+    def _get_char_service(self):
+        """アクティブなルールシステム込みの CharacterService を返す（遅延生成・キャッシュ）。"""
+        from character_service import CharacterService
+
+        from core.addons import AddonManager
+        from core.addons.addon_base import AddonContext
+
+        cache_key = (str(self._characters_file), str(SAVED_PCS_DIR))
+        if self._char_service_cache is not None and self._char_service_cache_key == cache_key:
+            return self._char_service_cache
+
+        mgr = AddonManager(addons_dir=ADDONS_DIR)
+        mgr.discover()
+        try:
+            from addon_management_tab import AddonStateManager
+
+            state_mgr = AddonStateManager(ADDON_STATE_JSON)
+            enabled_ids = state_mgr.state.get("enabled", [])
+        except Exception:
+            enabled_ids = list(mgr.manifests.keys())
+
+        ctx = AddonContext(
+            adapter=None,
+            lm_client=self._lm_client,
+            knowledge_manager=None,
+            session_manager=None,
+            character_manager=None,
+            root_dir=BASE_DIR,
+        )
+        for addon_id in enabled_ids:
+            if addon_id in mgr.manifests and mgr.manifests[addon_id].type == "rule_system":
+                try:
+                    mgr.load_addon(addon_id, ctx)
+                except Exception as e:
+                    print(f"[launcher_v2] rule_system ロード失敗 {addon_id}: {e}", file=sys.stderr)
+
+        service = CharacterService(
+            saved_pcs_dir=SAVED_PCS_DIR,
+            characters_file=self._characters_file,
+            addon_manager=mgr,
+            lm_client=self._lm_client,
+        )
+        self._char_service_cache = service
+        self._char_service_cache_key = cache_key
+        return service
 
     def _init_vars(self):
         self.var_name     = tk.StringVar(value="名無し")
@@ -1762,6 +1810,13 @@ class ActorsView(ctk.CTkFrame):
             state="disabled", command=self._on_edit,
         )
         self._btn_edit.pack(side="left", expand=True, fill="x", padx=(0, 4))
+        self._btn_vtt = ctk.CTkButton(
+            edit_row, text="📋  VTT コマとしてコピー", height=32,
+            fg_color="#2a5a2a", hover_color="#3a7a3a",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11),
+            state="disabled", command=self._on_copy_selected_to_vtt,
+        )
+        self._btn_vtt.pack(side="left", expand=True, fill="x", padx=(0, 4))
         self._btn_del = ctk.CTkButton(
             edit_row, text="削除", height=32,
             fg_color="#6b1a1a", hover_color="#8b2a2a",
@@ -1853,6 +1908,31 @@ class ActorsView(ctk.CTkFrame):
         self._show_detail(self._characters.get(char_id))
         self._btn_edit.configure(state="normal")
         self._btn_del.configure(state="normal")
+        self._btn_vtt.configure(state="normal")
+
+    def _on_copy_selected_to_vtt(self) -> None:
+        """選択中のキャラを CharacterService 経由で VTT コマとしてクリップボードにコピー。"""
+        cid = getattr(self, "_selected_char_id", None)
+        if not cid:
+            return
+        char = self._characters.get(cid, {})
+        name = char.get("name", cid)
+        try:
+            service = self._get_char_service()
+            bundle = service.load_bundle(name)
+            sheet = bundle.sheet if bundle is not None else {"name": name, "memo": char.get("description", "")}
+            payload_json = service.to_vtt_clipboard(sheet)
+            self.clipboard_clear()
+            self.clipboard_append(payload_json)
+            self.update()
+            messagebox.showinfo(
+                "コピー完了",
+                f"{name} のココフォリア用データをコピーしました！\nCtrl+V で貼り付けてください。",
+                parent=self.winfo_toplevel(),
+            )
+        except Exception as e:
+            messagebox.showerror("エラー", f"コピーに失敗しました: {e}",
+                                 parent=self.winfo_toplevel())
 
     def _show_detail(self, char: dict | None) -> None:
         self._detail_box.configure(state="normal")
@@ -1868,6 +1948,8 @@ class ActorsView(ctk.CTkFrame):
                 f"\n説明:\n{char.get('description', '')}",
             ]
             self._detail_box.insert("0.0", "\n".join(lines))
+        else:
+            self._btn_vtt.configure(state="disabled")
         self._detail_box.configure(state="disabled")
 
     def _toggle_enable(self, char_id: str, char: dict) -> None:
@@ -1919,6 +2001,9 @@ class ActorsView(ctk.CTkFrame):
                 save_json(self._characters_file, {"characters": {}})
             except Exception:
                 pass
+        # システム切替で CharacterService キャッシュを破棄
+        self._char_service_cache = None
+        self._char_service_cache_key = None
         self.refresh_chars()
 
     def on_show(self) -> None:
@@ -2195,74 +2280,73 @@ class ActorsView(ctk.CTkFrame):
         if not name:
             messagebox.showerror("エラー", "名前を入力してください。", parent=self.winfo_toplevel())
             return
-        data = self._last_json_raw.copy()
-        data.update({
-            "name": name, "alias": self.var_alias.get(),
+        sheet = self._collect_sheet_from_ui()
+        try:
+            from character_service import CharacterBundle
+
+            service = self._get_char_service()
+            persona = sheet.get("_persona", {}) if isinstance(sheet.get("_persona"), dict) else {}
+            bundle = CharacterBundle(
+                sheet=sheet,
+                roster_entry={
+                    "name": name,
+                    "description": (sheet.get("memo") or "")[:200],
+                },
+                persona=persona,
+            )
+            service.save_bundle(bundle)
+        except Exception as e:
+            messagebox.showerror("エラー", f"保存に失敗しました: {e}",
+                                 parent=self.winfo_toplevel())
+            return
+        self._maker_status_var.set(f"✓ {name} を保存しました！")
+        self._refresh_saved_list()
+        self.refresh_chars()
+
+    def _collect_sheet_from_ui(self) -> dict:
+        """UI の現在の入力値を 1 つのシート dict にまとめて返す。"""
+        sheet = dict(self._last_json_raw or {})
+        sheet.update({
+            "name": self.var_name.get().strip() or "名無し",
+            "alias": self.var_alias.get(),
             "hp": self.var_hp.get(), "sp": self.var_sp.get(),
-            "evasion": self.var_evasion.get(), "mobility": self.var_mobility.get(),
+            "evasion": self.var_evasion.get(),
+            "mobility": self.var_mobility.get(),
             "armor": self.var_armor.get(),
             "body": self.var_body.get(), "soul": self.var_soul.get(),
             "skill": self.var_skill.get(), "magic": self.var_magic.get(),
             "memo": self._maker_memo.get("0.0", "end").strip(),
         })
-        data["items"] = {
-            "katashiro": self.var_katashiro.get(), "haraegushi": self.var_haraegushi.get(),
-            "shimenawa": self.var_shimenawa.get(), "juryudan": self.var_juryudan.get(),
-            "ireikigu": self.var_ireikigu.get(), "meifuku": self.var_meifuku.get(),
+        sheet["items"] = {
+            "katashiro": self.var_katashiro.get(),
+            "haraegushi": self.var_haraegushi.get(),
+            "shimenawa": self.var_shimenawa.get(),
+            "juryudan": self.var_juryudan.get(),
+            "ireikigu": self.var_ireikigu.get(),
+            "meifuku": self.var_meifuku.get(),
             "jutsuyen": self.var_jutsuyen.get(),
         }
-        save_json(SAVED_PCS_DIR / f"{name}.json", data)
-        self._maker_status_var.set(f"✓ {name} を保存しました！")
-        self._refresh_saved_list()
-        self.refresh_chars()
+        return sheet
 
     def _copy_ccfolia(self) -> None:
-        name = self.var_name.get()
-        memo_text = f"【二つ名】{self.var_alias.get()}\n\n{self._maker_memo.get('0.0', 'end').strip()}"
-        commands = "◆能力値を使った判定◆\n"
-        commands += "{体}b6=>4  //【体】判定\n{霊}b6=>4  //【霊】判定\n"
-        commands += "{巧}b6=>4  //【巧】判定\n{術}b6=>4  //【術】判定\n\n"
-        commands += "◆特技◆\n"
-        for skill in self._last_json_raw.get("skills", []):
-            commands += f"【{skill.get('name', '')}】：{skill.get('description', '')}\n\n"
-        commands += "◆攻撃祭具◆\n"
-        for weapon in self._last_json_raw.get("weapons", []):
-            commands += f"【{weapon.get('name', '')}】：{weapon.get('description', '')}\n\n"
-        ccfolia_data = {
-            "kind": "character",
-            "data": {
-                "name": name, "initiative": 0, "memo": memo_text, "commands": commands,
-                "status": [
-                    {"label": "体力",   "value": self.var_hp.get(),       "max": self.var_hp.get()},
-                    {"label": "霊力",   "value": self.var_sp.get(),       "max": self.var_sp.get()},
-                    {"label": "回避D",  "value": self.var_evasion.get(),  "max": self.var_evasion.get()},
-                    {"label": "形代",   "value": self.var_katashiro.get(),"max": self.var_katashiro.get()},
-                ],
-                "params": [
-                    {"label": "体", "value": str(self.var_body.get())},
-                    {"label": "霊", "value": str(self.var_soul.get())},
-                    {"label": "巧", "value": str(self.var_skill.get())},
-                    {"label": "術", "value": str(self.var_magic.get())},
-                ],
-            },
-        }
-        self.clipboard_clear()
-        self.clipboard_append(json.dumps(ccfolia_data, ensure_ascii=False))
-        self.update()
-        self._maker_status_var.set("✓ ококофォリア用にコピー！Ctrl+Vで貼り付け")
-        messagebox.showinfo("コピー完了",
-                            "コクフォリア用データをコピーしました！\nCtrl+V で貼り付けてください。",
-                            parent=self.winfo_toplevel())
+        try:
+            sheet = self._collect_sheet_from_ui()
+            payload_json = self._get_char_service().to_vtt_clipboard(sheet)
+            self.clipboard_clear()
+            self.clipboard_append(payload_json)
+            self.update()
+            self._maker_status_var.set("✓ ココフォリア用にコピー！Ctrl+Vで貼り付け")
+            messagebox.showinfo(
+                "コピー完了",
+                "ココフォリア用データをコピーしました！\nCtrl+V で貼り付けてください。",
+                parent=self.winfo_toplevel(),
+            )
+        except Exception as e:
+            self._maker_status_var.set(f"❌ コピー失敗: {e}")
+            messagebox.showerror("エラー", f"コピーに失敗しました: {e}",
+                                 parent=self.winfo_toplevel())
 
     # ── AI生成 ─────────────────────────────────────────────────
-
-    def _build_char_prompt(self, user_req: str) -> str:
-        return f"""あなたはTRPG『タクティカル祓魔師』のプレイヤーです。
-ユーザーの要望に合わせて、以下のJSONフォーマットの空欄を論理的に埋めてください。
-【重要】必ず有効なJSON形式のみを出力し、Markdownコードブロック(```json)などは使用しないでください。
-ユーザー要望: {user_req}
-{{"name":"","alias":"","hp":15,"sp":15,"evasion":2,"mobility":3,"armor":0,"body":3,"soul":3,"skill":3,"magic":3,"items":{{"katashiro":1,"haraegushi":0,"shimenawa":0,"juryudan":0,"ireikigu":0,"meifuku":0,"jutsuyen":0}},"memo":"","skills":[],"weapons":[]}}
-"""
 
     def _start_generate(self) -> None:
         if not self._lm_client.is_server_running_sync():
@@ -2274,35 +2358,26 @@ class ActorsView(ctk.CTkFrame):
 
         def run():
             user_req = self._maker_input.get("0.0", "end").strip()
-            sys_prompt = "あなたはデータジェネレーターです。必ず指定されたJSON形式のみを出力し、余計な会話はしないでください。"
-            result, _ = self._lm_client.generate_response_sync(
-                system_prompt=sys_prompt,
-                user_message=self._build_char_prompt(user_req),
-                temperature=0.7, max_tokens=1500, timeout=None, no_think=True,
-            )
-            _post_to_main(lambda r=result: self._on_gen_finish(r))
+            try:
+                service = self._get_char_service()
+                bundle = service.generate_from_concept(user_req)
+            except Exception as e:
+                _post_to_main(lambda err=e: self._on_gen_finish(None, str(err)))
+                return
+            _post_to_main(lambda b=bundle: self._on_gen_finish(b, None))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_gen_finish(self, result: str) -> None:
+    def _on_gen_finish(self, bundle, error: str | None = None) -> None:
         self._maker_gen_btn.configure(state="normal")
-        if not result:
+        if error:
+            self._maker_status_var.set(f"❌ 生成失敗: {error}")
+            return
+        if bundle is None:
             self._maker_status_var.set("❌ 生成失敗")
             return
-        clean = result.replace("```json", "").replace("```", "").strip()
-        try:
-            data = json.loads(clean)
-            self._apply_json_to_ui(data)
-            self._maker_status_var.set("✓ 生成完了！内容を調整してください")
-            return
-        except json.JSONDecodeError:
-            pass
-        data = parse_llm_json_robust(result)
-        if data:
-            self._apply_json_to_ui(data)
-            self._maker_status_var.set("✓ 生成完了（フォールバック）！内容を調整してください")
-        else:
-            self._maker_status_var.set("❌ JSONパースエラー")
+        self._apply_json_to_ui(bundle.sheet)
+        self._maker_status_var.set("✓ 生成完了！内容を調整してください")
 
     # ── on_show フック ───────────────────────────────────────────
 

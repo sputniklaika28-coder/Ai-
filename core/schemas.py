@@ -305,6 +305,68 @@ class PortraitRequest(BaseModel):
     )
 
 
+# ──────────────────────────────────────
+# タクティカル祓魔師 シート直接出力スキーマ
+# ──────────────────────────────────────
+
+
+class TacticalExorcistItemSet(BaseModel):
+    """タクティカル祓魔師の支給装備カウント。"""
+
+    katashiro: int = Field(default=1, description="形代")
+    haraegushi: int = Field(default=0, description="祓串")
+    shimenawa: int = Field(default=0, description="注連鋼縄")
+    juryudan: int = Field(default=0, description="呪瘤檀")
+    ireikigu: int = Field(default=0, description="医霊器具")
+    meifuku: int = Field(default=0, description="名伏")
+    jutsuyen: int = Field(default=0, description="術延起点")
+
+
+class TacticalExorcistSkill(BaseModel):
+    """特技 1 件。CCFolia チャットパレット出力用に description を使う。"""
+
+    name: str = Field(description="特技名")
+    description: str = Field(description="効果説明")
+
+
+class TacticalExorcistWeapon(BaseModel):
+    """攻撃祭具 1 件。"""
+
+    name: str = Field(description="武器名")
+    description: str = Field(description="効果説明")
+
+
+class TacticalExorcistSheet(BaseModel):
+    """タクティカル祓魔師のキャラクターシート。
+
+    LMClient.generate_structured() で直接このシートを生成するために使う。
+    保存先 configs/saved_pcs/<name>.json および CCFolia コマ出力と互換。
+    """
+
+    name: str = Field(description="キャラクター名")
+    alias: str = Field(default="", description="二つ名")
+    hp: int = Field(default=15, description="体力")
+    sp: int = Field(default=15, description="霊力")
+    evasion: int = Field(default=2, description="回避D")
+    mobility: int = Field(default=3, description="機動力")
+    armor: int = Field(default=0, description="装甲")
+    body: int = Field(default=3, description="体")
+    soul: int = Field(default=3, description="霊")
+    skill: int = Field(default=3, description="巧")
+    magic: int = Field(default=3, description="術")
+    items: TacticalExorcistItemSet = Field(
+        default_factory=TacticalExorcistItemSet,
+        description="支給装備",
+    )
+    memo: str = Field(default="", description="キャラクターの背景・性格・動機")
+    skills: list[TacticalExorcistSkill] = Field(
+        default_factory=list, description="特技リスト",
+    )
+    weapons: list[TacticalExorcistWeapon] = Field(
+        default_factory=list, description="攻撃祭具リスト",
+    )
+
+
 # ══════════════════════════════════════
 # Phase 3: セッション状態管理 & 戦闘解決
 # ══════════════════════════════════════

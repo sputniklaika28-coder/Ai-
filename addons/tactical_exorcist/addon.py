@@ -112,6 +112,96 @@ class TacticalExorcistAddon(RuleSystemAddon):
     def get_prompt_templates(self) -> dict | None:
         return self._prompts
 
+    # ──────────────────────────────────────────
+    # キャラクター汎用フック（CharacterService が使用）
+    # ──────────────────────────────────────────
+
+    def get_character_sheet_template(self) -> dict:
+        """タクティカル祓魔師の空シートテンプレート。"""
+        return {
+            "name": "",
+            "alias": "",
+            "hp": 15, "sp": 15, "evasion": 2, "mobility": 3, "armor": 0,
+            "body": 3, "soul": 3, "skill": 3, "magic": 3,
+            "items": {
+                "katashiro": 1, "haraegushi": 0, "shimenawa": 0,
+                "juryudan": 0, "ireikigu": 0, "meifuku": 0, "jutsuyen": 0,
+            },
+            "memo": "",
+            "skills": [],
+            "weapons": [],
+        }
+
+    def get_character_generation_schema(self) -> type:
+        """generate_structured で直接シートを生成するためのスキーマ。"""
+        from core.schemas import TacticalExorcistSheet
+
+        return TacticalExorcistSheet
+
+    def build_vtt_piece_data(self, sheet: dict) -> dict:
+        """シート dict から CCFolia 貼り付け用ペイロードを構築する。
+
+        status (10 項目), params (6 項目), commands にチャットパレット
+        （能力値判定・戦闘判定・支給装備説明・特技・武器）を含む。
+        """
+        name = sheet.get("name") or "名無し"
+        alias = sheet.get("alias", "")
+        memo_body = sheet.get("memo", "") or ""
+        memo = f"【二つ名】{alias}\n\n{memo_body}" if alias else memo_body
+
+        def _i(key: str, default: int = 0) -> int:
+            v = sheet.get(key, default)
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+
+        items = sheet.get("items") or {}
+
+        def _item(key: str) -> int:
+            v = items.get(key, 0)
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
+
+        hp = _i("hp", 15)
+        sp = _i("sp", 15)
+        evasion = _i("evasion", 2)
+        status = [
+            {"label": "体力", "value": hp, "max": hp},
+            {"label": "霊力", "value": sp, "max": sp},
+            {"label": "回避D", "value": evasion, "max": evasion},
+            {"label": "形代", "value": _item("katashiro"), "max": _item("katashiro")},
+            {"label": "祓串", "value": _item("haraegushi"), "max": _item("haraegushi")},
+            {"label": "注連鋼縄", "value": _item("shimenawa"), "max": _item("shimenawa")},
+            {"label": "呪瘤檀", "value": _item("juryudan"), "max": _item("juryudan")},
+            {"label": "医霊器具", "value": _item("ireikigu"), "max": _item("ireikigu")},
+            {"label": "名伏", "value": _item("meifuku"), "max": _item("meifuku")},
+            {"label": "術延起点", "value": _item("jutsuyen"), "max": _item("jutsuyen")},
+        ]
+        params = [
+            {"label": "体", "value": str(_i("body", 3))},
+            {"label": "霊", "value": str(_i("soul", 3))},
+            {"label": "巧", "value": str(_i("skill", 3))},
+            {"label": "術", "value": str(_i("magic", 3))},
+            {"label": "機動力", "value": str(_i("mobility", 3))},
+            {"label": "装甲", "value": str(_i("armor", 0))},
+        ]
+        commands = _build_ccfolia_commands(sheet)
+
+        return {
+            "kind": "character",
+            "data": {
+                "name": name,
+                "initiative": 0,
+                "memo": memo,
+                "commands": commands,
+                "status": status,
+                "params": params,
+            },
+        }
+
     def interpret_character_sheet(self, sheet_data: dict) -> str:
         """キャラクターシートを自然言語テキストに変換する。"""
         name = sheet_data.get("name", "不明")
@@ -308,3 +398,81 @@ class TacticalExorcistAddon(RuleSystemAddon):
             return
         subprocess.Popen([sys.executable, str(char_maker_path)])
         logger.info("キャラクターメーカーを起動しました")
+
+
+# ──────────────────────────────────────────
+# CCFolia コマンド文字列ビルダー
+# ──────────────────────────────────────────
+
+
+def _build_ccfolia_commands(sheet: dict) -> str:
+    """シートから CCFolia 用チャットパレットコマンド文字列を生成する。"""
+    lines: list[str] = []
+
+    lines.append("◆能力値を使った判定◆")
+    lines.append("{体}b6=>4  //【体】判定")
+    lines.append("{霊}b6=>4  //【霊】判定")
+    lines.append("{巧}b6=>4  //【巧】判定")
+    lines.append("{術}b6=>4  //【術】判定")
+    lines.append("")
+
+    lines.append("◆戦闘中用の判定◆")
+    lines.append("{巧}b6=>4  //戦術機動")
+    lines.append("({体})b6=>4  //近接攻撃")
+    lines.append("({巧})b6=>4  //遠隔攻撃")
+    lines.append("({霊})b6=>4  //霊的攻撃")
+    lines.append("({術})b6=>4  //術発動")
+    lines.append("")
+
+    lines.append("2d6  //ダメージ")
+    lines.append("1d3  //霊的ダメージ")
+    lines.append("b6=>4  //回避判定")
+    lines.append("")
+
+    lines.append("C({体力})  //残り体力")
+    lines.append("C({霊力})  //残り霊力")
+    lines.append("")
+
+    lines.append("◆支給装備◆")
+    lines.append(
+        "【形代】：キャラクターが「死亡」した時、①【形代】を1つ消費することで「死亡」を回避する"
+        "②【体力】【霊力】を半分まで回復した状態でマップ上の「リスポーン地点」にキャラクターを戻す。"
+        "　また、手番中に好きなタイミングで【形代】を1つ消費することで、キャラクターは【霊力】を2点回復することができる。"
+    )
+    lines.append("")
+    lines.append(
+        "【祓串】：1つ消費することで自身を中心とした7*7マスのどこかに配置するか、"
+        "近接攻撃または遠隔攻撃に使用できる。近接攻撃に使用した場合は1d6点、"
+        "遠隔攻撃に使用した場合は3点の「物理ダメージ」を与える。"
+    )
+    lines.append("")
+    lines.append(
+        "【注連鋼縄】：3つ消費することで、【巧】の値を参照してマップ上に設置する。"
+        "結界に関するルールは2-7：結界の設置についてを参照。"
+    )
+    lines.append("")
+    lines.append(
+        "【呪瘤檀】：攻撃の代わりにこのアイテムを使用する。"
+        "自分を中心とした5＊5マスのいずれかのマス1つを「中心」に定め、"
+        "「中心」と隣接する3＊3のマスにいるキャラクター全員に2点の霊的ダメージを与える（回避は『難易度：NORMAL』）。"
+    )
+    lines.append("")
+
+    skills = sheet.get("skills") or []
+    if skills:
+        lines.append("◆特技◆")
+        for s in skills:
+            if isinstance(s, dict):
+                lines.append(f"【{s.get('name', '')}】：{s.get('description', '')}")
+                lines.append("")
+
+    weapons = sheet.get("weapons") or []
+    if weapons:
+        lines.append("◆攻撃祭具◆")
+        for w in weapons:
+            if isinstance(w, dict):
+                lines.append(f"【{w.get('name', '')}】：{w.get('description', '')}")
+                lines.append("")
+
+    lines.append("[Credit: 非公式タクティカル祓魔師キャラクターシートVer0.8 著作者様]")
+    return "\n".join(lines)
