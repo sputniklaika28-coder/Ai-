@@ -117,6 +117,23 @@ def check_lm_studio() -> bool:
         return False
 
 
+def _open_folder(path: Path) -> None:
+    """OS のファイラーで指定フォルダを開く。存在しなければ作成する。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception as e:
+        messagebox.showerror("エラー", f"フォルダを開けませんでした:\n{path}\n{e}")
+
+
 def _resolve_image_path(image_path: str | Path | None) -> Path | None:
     """image_path 文字列を絶対パスに解決する。空/不在時は None。"""
     if not image_path:
@@ -934,19 +951,29 @@ class HomeView(ctk.CTkFrame):
         # セッション詳細パネル（左ペインの選択に連動）
         self._detail_panel = ctk.CTkFrame(left, fg_color="#1a1a1a", corner_radius=6)
         self._detail_panel.pack(fill="x", padx=6, pady=(0, 4))
-        self._detail_var = tk.StringVar(value="セッションを選択してください")
         ctk.CTkLabel(
             self._detail_panel,
-            textvariable=self._detail_var,
-            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text="セッション詳細",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9, weight="bold"),
             text_color=AppTheme.TEXT_DIM,
-            wraplength=140,
-            justify="left",
-        ).pack(padx=8, pady=6)
+        ).pack(anchor="w", padx=8, pady=(6, 0))
+        self._detail_box = ctk.CTkTextbox(
+            self._detail_panel,
+            state="disabled",
+            height=140,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            fg_color="#111111",
+            text_color=AppTheme.TEXT_DIM,
+            wrap="word",
+        )
+        self._detail_box.pack(fill="x", padx=6, pady=(2, 6))
+        self._set_detail_text("セッションを選択してください")
 
+        action_row = ctk.CTkFrame(left, fg_color="transparent")
+        action_row.pack(fill="x", padx=8, pady=(0, 4))
         self._btn_resume = ctk.CTkButton(
-            left,
-            text="🔄 この状態から再開",
+            action_row,
+            text="🔄 再開",
             height=28,
             fg_color="#333333",
             hover_color="#444444",
@@ -954,7 +981,28 @@ class HomeView(ctk.CTkFrame):
             state="disabled",
             command=self._on_resume,
         )
-        self._btn_resume.pack(fill="x", padx=8, pady=(0, 8))
+        self._btn_resume.pack(side="left", expand=True, fill="x", padx=(0, 2))
+        self._btn_open_folder = ctk.CTkButton(
+            action_row,
+            text="📂 開く",
+            height=28,
+            fg_color="#333333",
+            hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            state="disabled",
+            command=self._on_open_folder,
+        )
+        self._btn_open_folder.pack(side="left", expand=True, fill="x", padx=(2, 0))
+
+        ctk.CTkButton(
+            left,
+            text="📁 履歴フォルダを開く",
+            height=24,
+            fg_color="#262626",
+            hover_color="#363636",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=lambda: _open_folder(SESSIONS_DIR),
+        ).pack(fill="x", padx=8, pady=(0, 8))
 
     # ── セッション履歴 ────────────────────────────────────────────
 
@@ -986,20 +1034,38 @@ class HomeView(ctk.CTkFrame):
         self._selected_folder = folder
         self._var_session.set(folder.name)
 
-        info_lines = [f"📁 {folder.name}"]
-        log_file = folder / "chat_log.jsonl"
+        info_lines = [f"📁 {folder.name}", ""]
         summary_file = folder / "summary.txt"
+        log_file = folder / "chat_log.jsonl"
         if summary_file.exists():
-            with open(summary_file, encoding="utf-8") as f:
-                info_lines.append(f.read()[:120])
+            try:
+                with open(summary_file, encoding="utf-8") as f:
+                    info_lines.append("【あらすじ】")
+                    info_lines.append(f.read().strip())
+            except Exception as e:
+                info_lines.append(f"(summary.txt 読込エラー: {e})")
+        else:
+            info_lines.append("（あらすじは作成されていません）")
         if log_file.exists():
             try:
                 count = sum(1 for l in open(log_file, encoding="utf-8") if l.strip())
-                info_lines.append(f"ログ: {count} 件")
+                info_lines.append(f"\nログ記録数: {count} 件")
             except Exception:
                 pass
-        self._detail_var.set("\n".join(info_lines))
+        self._set_detail_text("\n".join(info_lines))
         self._btn_resume.configure(state="normal")
+        self._btn_open_folder.configure(state="normal")
+
+    def _set_detail_text(self, text: str) -> None:
+        self._detail_box.configure(state="normal")
+        self._detail_box.delete("0.0", "end")
+        self._detail_box.insert("0.0", text)
+        self._detail_box.configure(state="disabled")
+
+    def _on_open_folder(self) -> None:
+        folder = getattr(self, "_selected_folder", None)
+        if folder and folder.exists():
+            _open_folder(folder)
 
     def _on_resume(self) -> None:
         folder = getattr(self, "_selected_folder", None)
@@ -2547,6 +2613,79 @@ class WorldView(ctk.CTkFrame):
 
 
 # ─────────────────────────────────────────────────────────────────
+# 汎用辞書入力ダイアログ（ハウスルール／ミニゲーム編集用）
+# ─────────────────────────────────────────────────────────────────
+
+class _SimpleDictDialog(ctk.CTkToplevel):
+    """複数テキストフィールドを 1 枚のダイアログで編集する汎用ダイアログ。
+
+    ``fields`` は ``(key, label, initial_value)`` のタプルのリスト。
+    ``ask`` クラスメソッドで同期呼出し → dict を返す（キャンセル時は None）。
+    """
+
+    def __init__(self, parent, title: str, fields: list[tuple[str, str, str]]):
+        super().__init__(parent)
+        self.result: dict | None = None
+        self._fields = fields
+        self._vars: dict[str, tk.StringVar] = {}
+        self.title(title)
+        self.configure(fg_color=AppTheme.BG)
+        self.geometry("460x360")
+        self.transient(parent)
+        self.after(50, self.grab_set)
+        self._build_ui(title)
+
+    def _build_ui(self, title: str) -> None:
+        ctk.CTkLabel(
+            self, text=title,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=13, weight="bold"),
+            text_color=AppTheme.TEXT_HEAD,
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        form = ctk.CTkFrame(self, fg_color=AppTheme.SURFACE, corner_radius=8)
+        form.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        for key, label, initial in self._fields:
+            ctk.CTkLabel(
+                form, text=label,
+                font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+                text_color=AppTheme.TEXT,
+            ).pack(anchor="w", padx=12, pady=(10, 2))
+            var = tk.StringVar(value=initial)
+            self._vars[key] = var
+            ctk.CTkEntry(
+                form, textvariable=var,
+                fg_color="#1a1a1a", border_color="#333333",
+                font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            ).pack(fill="x", padx=12, pady=(0, 4))
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkButton(
+            btn_row, text="保存", width=100, height=32,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            command=self._on_save,
+        ).pack(side="right", padx=4)
+        ctk.CTkButton(
+            btn_row, text="キャンセル", width=100, height=32,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11),
+            command=self.destroy,
+        ).pack(side="right", padx=4)
+
+    def _on_save(self) -> None:
+        self.result = {k: v.get().strip() for k, v in self._vars.items()}
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, title: str, fields: list[tuple[str, str, str]]) -> dict | None:
+        dlg = cls(parent, title, fields)
+        parent.wait_window(dlg)
+        return dlg.result
+
+
+# ─────────────────────────────────────────────────────────────────
 # プロンプトダイアログ（tk.Toplevel 流用）
 # ─────────────────────────────────────────────────────────────────
 
@@ -3001,6 +3140,10 @@ class AIConfigView(ctk.CTkFrame):
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=8, pady=8)
 
+        # セッションごとのハウスルール／ミニゲームはこのビュー内でメモリ保持
+        self._house_rules: list[dict] = []
+        self._mini_games: list[dict] = []
+
         # セッション情報
         info_frame = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
         info_frame.pack(fill="x", pady=(0, 8))
@@ -3050,6 +3193,60 @@ class AIConfigView(ctk.CTkFrame):
         )
         self._char_check_frame.pack(fill="x", padx=10, pady=(0, 8))
 
+        # ── ハウスルール ───────────────────────────────────────
+        rules_frame = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
+        rules_frame.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            rules_frame, text="ハウスルール (セッション固有・基底設定より優先)",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            rules_frame,
+            text="SessionOrchestrator 経由で参照されます。同名は上書き扱い。",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+        self._rules_list_frame = ctk.CTkScrollableFrame(
+            rules_frame, fg_color="transparent", height=120,
+        )
+        self._rules_list_frame.pack(fill="x", padx=10, pady=(0, 4))
+        rules_btn_row = ctk.CTkFrame(rules_frame, fg_color="transparent")
+        rules_btn_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkButton(
+            rules_btn_row, text="＋ ルール追加", height=28,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            command=self._add_house_rule,
+        ).pack(side="left", padx=(0, 4))
+
+        # ── ミニゲーム ──────────────────────────────────────────
+        games_frame = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
+        games_frame.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            games_frame, text="追加ミニゲーム (セッション中に呼び出し可能)",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            games_frame,
+            text="trigger は自由記述または正規表現。enabled=false で一時無効化。",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+        self._games_list_frame = ctk.CTkScrollableFrame(
+            games_frame, fg_color="transparent", height=120,
+        )
+        self._games_list_frame.pack(fill="x", padx=10, pady=(0, 4))
+        games_btn_row = ctk.CTkFrame(games_frame, fg_color="transparent")
+        games_btn_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkButton(
+            games_btn_row, text="＋ ミニゲーム追加", height=28,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            command=self._add_mini_game,
+        ).pack(side="left", padx=(0, 4))
+
         # ボタン群
         btn_row = ctk.CTkFrame(scroll, fg_color="transparent")
         btn_row.pack(fill="x")
@@ -3094,11 +3291,14 @@ class AIConfigView(ctk.CTkFrame):
                                    parent=self.winfo_toplevel())
             return
         selected = [cid for cid, var in self._char_vars.items() if var.get()]
-        save_json(SESSION_JSON, {
-            "session_name": name,
-            "memo": self._sess_memo.get("0.0", "end").strip(),
-            "selected_characters": selected,
-        })
+        # 既存データを保持しつつ上書き（SessionOrchestrator が追加フィールドを参照するため）
+        data = load_json(SESSION_JSON)
+        data["session_name"] = name
+        data["memo"] = self._sess_memo.get("0.0", "end").strip()
+        data["selected_characters"] = selected
+        data["house_rules"] = list(self._house_rules)
+        data["mini_games"] = list(self._mini_games)
+        save_json(SESSION_JSON, data)
         messagebox.showinfo("完了", "セッション設定を保存しました",
                             parent=self.winfo_toplevel())
 
@@ -3108,6 +3308,232 @@ class AIConfigView(ctk.CTkFrame):
         self._sess_memo.delete("0.0", "end")
         self._sess_memo.insert("0.0", data.get("memo", ""))
         self._sess_refresh_chars(selected_ids=data.get("selected_characters"))
+        self._house_rules = [dict(r) for r in data.get("house_rules", []) if isinstance(r, dict)]
+        self._mini_games = [dict(g) for g in data.get("mini_games", []) if isinstance(g, dict)]
+        self._refresh_house_rules()
+        self._refresh_mini_games()
+
+    # ── ハウスルール編集 ──────────────────────────────────────────
+
+    def _refresh_house_rules(self) -> None:
+        for w in self._rules_list_frame.winfo_children():
+            w.destroy()
+        if not self._house_rules:
+            ctk.CTkLabel(
+                self._rules_list_frame,
+                text="（未登録）",
+                font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+                text_color=AppTheme.TEXT_DIM,
+            ).pack(anchor="w", padx=4, pady=4)
+            return
+        for idx, rule in enumerate(self._house_rules):
+            self._build_rule_row(idx, rule)
+
+    def _build_rule_row(self, idx: int, rule: dict) -> None:
+        row = ctk.CTkFrame(self._rules_list_frame, fg_color="#111111", corner_radius=4)
+        row.pack(fill="x", pady=1, padx=2)
+        enabled_var = tk.BooleanVar(value=rule.get("enabled", True))
+        def _toggle(i=idx, v=enabled_var):
+            self._house_rules[i]["enabled"] = bool(v.get())
+        ctk.CTkCheckBox(
+            row, text="", width=24, variable=enabled_var,
+            onvalue=True, offvalue=False,
+            fg_color=AppTheme.ACCENT, command=_toggle,
+        ).pack(side="left", padx=(6, 2))
+        ctk.CTkLabel(
+            row,
+            text=f"{rule.get('name', '(名称未設定)')}  (優先度: {rule.get('priority', 100)})",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(side="left", padx=4)
+        desc = rule.get("description", "") or ""
+        if desc:
+            ctk.CTkLabel(
+                row,
+                text=f" — {desc[:40]}{'…' if len(desc) > 40 else ''}",
+                font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+                text_color=AppTheme.TEXT_DIM,
+            ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            row, text="編集", width=50, height=22,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=lambda i=idx: self._edit_house_rule(i),
+        ).pack(side="right", padx=2)
+        ctk.CTkButton(
+            row, text="削除", width=50, height=22,
+            fg_color="#6b1a1a", hover_color="#8b2a2a",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=lambda i=idx: self._delete_house_rule(i),
+        ).pack(side="right", padx=2)
+
+    def _add_house_rule(self) -> None:
+        rule = _SimpleDictDialog.ask(
+            self.winfo_toplevel(),
+            title="ハウスルール追加",
+            fields=[
+                ("name", "ルール名", ""),
+                ("description", "説明", ""),
+                ("priority", "優先度 (int)", "100"),
+            ],
+        )
+        if rule is None:
+            return
+        if not rule.get("name"):
+            messagebox.showwarning("入力エラー", "ルール名は必須です",
+                                   parent=self.winfo_toplevel())
+            return
+        try:
+            rule["priority"] = int(rule.get("priority") or 100)
+        except ValueError:
+            rule["priority"] = 100
+        rule["enabled"] = True
+        rule["params"] = {}
+        self._house_rules.append(rule)
+        self._refresh_house_rules()
+
+    def _edit_house_rule(self, idx: int) -> None:
+        if not (0 <= idx < len(self._house_rules)):
+            return
+        current = self._house_rules[idx]
+        edited = _SimpleDictDialog.ask(
+            self.winfo_toplevel(),
+            title="ハウスルール編集",
+            fields=[
+                ("name", "ルール名", current.get("name", "")),
+                ("description", "説明", current.get("description", "")),
+                ("priority", "優先度 (int)", str(current.get("priority", 100))),
+            ],
+        )
+        if edited is None:
+            return
+        if not edited.get("name"):
+            return
+        try:
+            edited["priority"] = int(edited.get("priority") or 100)
+        except ValueError:
+            edited["priority"] = current.get("priority", 100)
+        edited["enabled"] = current.get("enabled", True)
+        edited["params"] = current.get("params", {})
+        self._house_rules[idx] = edited
+        self._refresh_house_rules()
+
+    def _delete_house_rule(self, idx: int) -> None:
+        if not (0 <= idx < len(self._house_rules)):
+            return
+        name = self._house_rules[idx].get("name", "")
+        if messagebox.askyesno("確認", f"'{name}' を削除しますか？",
+                               parent=self.winfo_toplevel()):
+            del self._house_rules[idx]
+            self._refresh_house_rules()
+
+    # ── ミニゲーム編集 ────────────────────────────────────────────
+
+    def _refresh_mini_games(self) -> None:
+        for w in self._games_list_frame.winfo_children():
+            w.destroy()
+        if not self._mini_games:
+            ctk.CTkLabel(
+                self._games_list_frame,
+                text="（未登録）",
+                font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+                text_color=AppTheme.TEXT_DIM,
+            ).pack(anchor="w", padx=4, pady=4)
+            return
+        for idx, game in enumerate(self._mini_games):
+            self._build_game_row(idx, game)
+
+    def _build_game_row(self, idx: int, game: dict) -> None:
+        row = ctk.CTkFrame(self._games_list_frame, fg_color="#111111", corner_radius=4)
+        row.pack(fill="x", pady=1, padx=2)
+        enabled_var = tk.BooleanVar(value=game.get("enabled", True))
+        def _toggle(i=idx, v=enabled_var):
+            self._mini_games[i]["enabled"] = bool(v.get())
+        ctk.CTkCheckBox(
+            row, text="", width=24, variable=enabled_var,
+            onvalue=True, offvalue=False,
+            fg_color=AppTheme.ACCENT, command=_toggle,
+        ).pack(side="left", padx=(6, 2))
+        ctk.CTkLabel(
+            row,
+            text=f"{game.get('name', '(名称未設定)')}  (trigger: {game.get('trigger', '') or '-'})",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            row, text="編集", width=50, height=22,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=lambda i=idx: self._edit_mini_game(i),
+        ).pack(side="right", padx=2)
+        ctk.CTkButton(
+            row, text="削除", width=50, height=22,
+            fg_color="#6b1a1a", hover_color="#8b2a2a",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=lambda i=idx: self._delete_mini_game(i),
+        ).pack(side="right", padx=2)
+
+    def _add_mini_game(self) -> None:
+        game = _SimpleDictDialog.ask(
+            self.winfo_toplevel(),
+            title="ミニゲーム追加",
+            fields=[
+                ("name", "識別子", ""),
+                ("description", "説明", ""),
+                ("trigger", "起動条件 / 正規表現", ""),
+                ("priority", "優先度 (int)", "100"),
+            ],
+        )
+        if game is None:
+            return
+        if not game.get("name"):
+            messagebox.showwarning("入力エラー", "識別子は必須です",
+                                   parent=self.winfo_toplevel())
+            return
+        try:
+            game["priority"] = int(game.get("priority") or 100)
+        except ValueError:
+            game["priority"] = 100
+        game["enabled"] = True
+        game["params"] = {}
+        self._mini_games.append(game)
+        self._refresh_mini_games()
+
+    def _edit_mini_game(self, idx: int) -> None:
+        if not (0 <= idx < len(self._mini_games)):
+            return
+        current = self._mini_games[idx]
+        edited = _SimpleDictDialog.ask(
+            self.winfo_toplevel(),
+            title="ミニゲーム編集",
+            fields=[
+                ("name", "識別子", current.get("name", "")),
+                ("description", "説明", current.get("description", "")),
+                ("trigger", "起動条件 / 正規表現", current.get("trigger", "")),
+                ("priority", "優先度 (int)", str(current.get("priority", 100))),
+            ],
+        )
+        if edited is None:
+            return
+        if not edited.get("name"):
+            return
+        try:
+            edited["priority"] = int(edited.get("priority") or 100)
+        except ValueError:
+            edited["priority"] = current.get("priority", 100)
+        edited["enabled"] = current.get("enabled", True)
+        edited["params"] = current.get("params", {})
+        self._mini_games[idx] = edited
+        self._refresh_mini_games()
+
+    def _delete_mini_game(self, idx: int) -> None:
+        if not (0 <= idx < len(self._mini_games)):
+            return
+        name = self._mini_games[idx].get("name", "")
+        if messagebox.askyesno("確認", f"'{name}' を削除しますか？",
+                               parent=self.winfo_toplevel()):
+            del self._mini_games[idx]
+            self._refresh_mini_games()
 
     # ── ジェネレータータブ ────────────────────────────────────────
 
@@ -3129,8 +3555,17 @@ class AIConfigView(ctk.CTkFrame):
         ctk.CTkComboBox(
             left,
             variable=self._gen_target_var,
-            values=["エネミー（敵）作成", "シナリオ概要・イベント作成",
-                    "アイテム・祭具作成", "その他（カスタム）"],
+            values=[
+                "エネミー（敵）作成",
+                "NPC（脇役）作成",
+                "シナリオ概要・イベント作成",
+                "シーン描写作成",
+                "アイテム・祭具作成",
+                "ハウスルール作成",
+                "ミニゲームルール作成",
+                "ルーム背景・BGM提案",
+                "その他（カスタム）",
+            ],
             font=ctk.CTkFont(family="Yu Gothic UI", size=10),
             fg_color="#111111", border_color="#444444",
             button_color="#333333",
@@ -3198,6 +3633,7 @@ class AIConfigView(ctk.CTkFrame):
 
         def run():
             user_req = self._gen_input.get("0.0", "end").strip()
+            target = self._gen_target_var.get()
             try:
                 compressed_path = BASE_DIR / "configs" / "world_setting_compressed.txt"
                 compressed_data = compressed_path.read_text(encoding="utf-8") if compressed_path.exists() else ""
@@ -3209,10 +3645,14 @@ class AIConfigView(ctk.CTkFrame):
                 "【絶対厳守事項】\n"
                 "1. オリジナルスキルの捏造は絶対に許されません。\n"
                 "2. 初期能力値やHP等のパラメータは、チートにならない範囲でルールに則り決定してください。\n"
-                "3. 世界観データを踏まえ、キャラクターの背景設定も作成してください。\n"
+                "3. 世界観データを踏まえ、背景設定・世界観整合性も考慮してください。\n"
                 "4. 必ずJSONで出力してください。"
             )
-            user_msg = f"以下の要望に合うデータを生成してください。\n要望: {user_req}"
+            user_msg = (
+                f"以下の要望に合うデータを生成してください。\n"
+                f"作成対象: {target}\n"
+                f"要望: {user_req}"
+            )
             try:
                 result, _ = self._lm_client.generate_response_sync(
                     system_prompt=sys_prompt, user_message=user_msg,
@@ -3261,6 +3701,9 @@ class SystemView(ctk.CTkFrame):
         ("LM_STUDIO_URL",        "LM Studio URL",            "http://localhost:1234","ローカル LLM サーバー", "entry"),
         ("VLM_PROVIDER",         "VLM プロバイダー",          "local",                "Canvas 解析用 VLM",     "combo"),
         ("VLM_MODEL",            "VLM モデル",               "",                     "VLM モデル名（空欄=自動）", "combo"),
+        ("COMFYUI_URL",          "ComfyUI URL",              "http://localhost:8188","立ち絵／画像生成サーバー", "entry"),
+        ("COMFYUI_WORKFLOW",     "ComfyUI ワークフロー",      "",                     "既定のワークフロー名（空欄=デフォルト）", "entry"),
+        ("GENERATED_IMAGES_DIR", "生成画像の保存先",          "generated_images",     "立ち絵・画像の出力ディレクトリ", "entry"),
         ("OPENAI_API_KEY",       "OpenAI API Key",           "",                     "クラウド利用時（任意）", "password"),
         ("ANTHROPIC_API_KEY",    "Anthropic API Key",        "",                     "クラウド利用時（任意）", "password"),
     ]
@@ -3422,6 +3865,43 @@ class SystemView(ctk.CTkFrame):
             text_color=AppTheme.TEXT_DIM,
         ).pack(anchor="w", padx=10, pady=(0, 8))
 
+        # ComfyUI 接続テスト
+        cf_frm = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
+        cf_frm.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            cf_frm, text="画像生成 (ComfyUI) 接続テスト",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+
+        cf_row = ctk.CTkFrame(cf_frm, fg_color="transparent")
+        cf_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(
+            cf_row, text="接続状態:",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            text_color=AppTheme.TEXT,
+        ).pack(side="left")
+        self._cf_result_var = tk.StringVar(value="未確認")
+        self._cf_result_lbl = ctk.CTkLabel(
+            cf_row, textvariable=self._cf_result_var,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            text_color=AppTheme.TEXT_DIM,
+        )
+        self._cf_result_lbl.pack(side="left", padx=8)
+        ctk.CTkButton(
+            cf_row, text="接続テスト", width=100, height=28,
+            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            command=self._comfyui_test,
+        ).pack(side="left")
+        ctk.CTkLabel(
+            cf_frm,
+            text="ComfyUI は画像・立ち絵自動生成アドオンが利用します。URL 未設定でも他機能に影響はありません。",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+            wraplength=520, justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
         self._env_load()
 
     @staticmethod
@@ -3501,6 +3981,31 @@ class SystemView(ctk.CTkFrame):
             self._lm_result_var.set("✗ 接続失敗 — LM Studio を起動してください")
             self._lm_result_lbl.configure(text_color=AppTheme.ERROR)
             self._lm_models_var.set(f"エラー: {detail}")
+
+    def _comfyui_test(self) -> None:
+        url = self._env_vars.get("COMFYUI_URL", tk.StringVar()).get().strip() or "http://localhost:8188"
+        self._cf_result_var.set("接続中...")
+        self._cf_result_lbl.configure(text_color=AppTheme.TEXT_DIM)
+
+        def _check():
+            try:
+                r = requests.get(f"{url}/system_stats", timeout=3)
+                if r.status_code == 200:
+                    _post_to_main(lambda: self._set_cf_result(True, "system_stats OK"))
+                    return
+                _post_to_main(lambda s=r.status_code: self._set_cf_result(False, f"HTTP {s}"))
+            except Exception as exc:
+                _post_to_main(lambda e=str(exc): self._set_cf_result(False, e))
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _set_cf_result(self, ok: bool, detail: str) -> None:
+        if ok:
+            self._cf_result_var.set(f"✓ 接続成功 ({detail})")
+            self._cf_result_lbl.configure(text_color=AppTheme.OK)
+        else:
+            self._cf_result_var.set(f"✗ 接続失敗 — {detail}")
+            self._cf_result_lbl.configure(text_color=AppTheme.ERROR)
 
     # ── 依存関係タブ ──────────────────────────────────────────────
 
@@ -3685,6 +4190,7 @@ class TacticalAILauncherV2(ctk.CTk):
         from system_registry import SystemRegistry
         self._system_registry = SystemRegistry(CONFIGS_DIR)
 
+        self._build_menu()
         self._build_layout()
         self._init_views()
         self._load_addon_sidebar_slots()
@@ -3692,6 +4198,42 @@ class TacticalAILauncherV2(ctk.CTk):
         self._show_view("home")
         self.status_bar.start_polling()
         self.after(40, self._drain_ui_queue)
+
+    def _build_menu(self) -> None:
+        """ファイル／ヘルプメニュー。設定・セッションフォルダへのショートカット。"""
+        menubar = tk.Menu(self)
+        f_menu = tk.Menu(menubar, tearoff=0)
+        f_menu.add_command(
+            label="設定フォルダを開く",
+            command=lambda: _open_folder(CONFIGS_DIR),
+        )
+        f_menu.add_command(
+            label="セッション履歴フォルダを開く",
+            command=lambda: _open_folder(SESSIONS_DIR),
+        )
+        f_menu.add_command(
+            label="アドオンフォルダを開く",
+            command=lambda: _open_folder(ADDONS_DIR),
+        )
+        f_menu.add_separator()
+        f_menu.add_command(label="終了", command=self._on_close)
+        menubar.add_cascade(label="ファイル", menu=f_menu)
+
+        h_menu = tk.Menu(menubar, tearoff=0)
+        h_menu.add_command(
+            label="バージョン情報",
+            command=lambda: messagebox.showinfo(
+                "バージョン情報",
+                "タクティカル祓魔師 AI — 統合ランチャー v2.0.0",
+                parent=self,
+            ),
+        )
+        menubar.add_cascade(label="ヘルプ", menu=h_menu)
+        try:
+            self.config(menu=menubar)
+        except Exception:
+            # CTk 環境によってはメニューバーがサポートされないため握りつぶす
+            pass
 
     def _build_layout(self) -> None:
         # grid で3ペイン固定配置
