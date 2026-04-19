@@ -124,6 +124,38 @@ class YourSystemAddon(RuleSystemAddon):
         return f"【{name}】{memo[:80]}"
 
     # ──────────────────────────────────────────────────────────────────────────
+    # キャラクター汎用フック（CharacterService が使用）
+    #
+    # 以下 3 メソッドはデフォルトで動作するため必須ではありませんが、
+    # システム固有のシート形式 / AI 生成スキーマ / VTT コマ形式を
+    # 提供したい場合にオーバーライドしてください。
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def get_character_sheet_template(self) -> dict:
+        """このシステムの空シートテンプレートを返す。
+
+        TODO: 例:
+            return {"name": "", "memo": "", "stats": {"str": 10, "dex": 10}, "skills": []}
+        """
+        return super().get_character_sheet_template()
+
+    def get_character_generation_schema(self) -> type:
+        """AI 構造化生成に使う Pydantic モデルクラスを返す。
+
+        TODO: core/schemas.py にシステム固有の BaseModel を追加し、それを返す。
+        デフォルトは汎用の CharacterConceptOutput。
+        """
+        return super().get_character_generation_schema()
+
+    def build_vtt_piece_data(self, sheet: dict) -> dict:
+        """シート dict から CCFolia 貼り付け用ペイロードを構築する。
+
+        TODO: status[]（体力等）、params[]（能力値）、commands（チャットパレット）を
+        このシステム用に組み立てる。デフォルトは name のみのミニマルな駒。
+        """
+        return super().build_vtt_piece_data(sheet)
+
+    # ──────────────────────────────────────────────────────────────────────────
     # ツール定義（system_generator.py が存在する場合に自動追加）
     # ──────────────────────────────────────────────────────────────────────────
 

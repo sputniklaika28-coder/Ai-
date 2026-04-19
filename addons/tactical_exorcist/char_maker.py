@@ -369,41 +369,69 @@ class TacticalExorcistCharMaker(tk.Tk):
 
     # ── CCFolia 出力 ──────────────────────────────────────────────────────────
 
+    def _current_sheet_dict(self) -> dict:
+        """UI 上の入力値からシート dict を組み立てる。"""
+        sheet = dict(self._last_json_raw or {})
+        sheet.update({
+            "name": self.var_name.get(),
+            "alias": self.var_alias.get(),
+            "hp": self.var_hp.get(), "sp": self.var_sp.get(),
+            "evasion": self.var_evasion.get(),
+            "mobility": self.var_mobility.get(),
+            "armor": self.var_armor.get(),
+            "body": self.var_body.get(), "soul": self.var_soul.get(),
+            "skill": self.var_skill.get(), "magic": self.var_magic.get(),
+            "items": {
+                "katashiro": self.var_katashiro.get(),
+                "haraegushi": self.var_haraegushi.get(),
+                "shimenawa": self.var_shimenawa.get(),
+                "juryudan": self.var_juryudan.get(),
+                "ireikigu": self.var_ireikigu.get(),
+                "meifuku": self.var_meifuku.get(),
+                "jutsuyen": self.var_jutsuyen.get(),
+            },
+            "memo": self.text_memo.get("1.0", tk.END).strip(),
+        })
+        return sheet
+
     def _copy_ccfolia(self) -> None:
-        name = self.var_name.get()
-        memo_text = (
-            f"【二つ名】{self.var_alias.get()}\n\n{self.text_memo.get('1.0', tk.END).strip()}"
-        )
+        # addon.py 内の汎用ロジックに委譲する（重複実装を排除）
+        from addons.tactical_exorcist.addon import _build_ccfolia_commands
 
-        commands = _build_ccfolia_commands(self._last_json_raw)
+        sheet = self._current_sheet_dict()
+        name = sheet.get("name") or "名無し"
+        memo_text = f"【二つ名】{sheet.get('alias', '')}\n\n{sheet.get('memo', '')}"
 
+        items = sheet.get("items", {})
+        status = [
+            {"label": "体力", "value": sheet["hp"], "max": sheet["hp"]},
+            {"label": "霊力", "value": sheet["sp"], "max": sheet["sp"]},
+            {"label": "回避D", "value": sheet["evasion"], "max": sheet["evasion"]},
+            {"label": "形代", "value": items.get("katashiro", 0), "max": items.get("katashiro", 0)},
+            {"label": "祓串", "value": items.get("haraegushi", 0), "max": items.get("haraegushi", 0)},
+            {"label": "注連鋼縄", "value": items.get("shimenawa", 0), "max": items.get("shimenawa", 0)},
+            {"label": "呪瘤檀", "value": items.get("juryudan", 0), "max": items.get("juryudan", 0)},
+            {"label": "医霊器具", "value": items.get("ireikigu", 0), "max": items.get("ireikigu", 0)},
+            {"label": "名伏", "value": items.get("meifuku", 0), "max": items.get("meifuku", 0)},
+            {"label": "術延起点", "value": items.get("jutsuyen", 0), "max": items.get("jutsuyen", 0)},
+        ]
+        params = [
+            {"label": "体", "value": str(sheet["body"])},
+            {"label": "霊", "value": str(sheet["soul"])},
+            {"label": "巧", "value": str(sheet["skill"])},
+            {"label": "術", "value": str(sheet["magic"])},
+            {"label": "機動力", "value": str(sheet["mobility"])},
+            {"label": "装甲", "value": str(sheet["armor"])},
+        ]
         ccfolia_data = {
             "kind": "character",
             "data": {
                 "name": name,
                 "initiative": 0,
                 "memo": memo_text,
-                "commands": commands,
-                "status": [
-                    {"label": "体力", "value": self.var_hp.get(), "max": self.var_hp.get()},
-                    {"label": "霊力", "value": self.var_sp.get(), "max": self.var_sp.get()},
-                    {"label": "回避D", "value": self.var_evasion.get(), "max": self.var_evasion.get()},
-                    {"label": "形代", "value": self.var_katashiro.get(), "max": self.var_katashiro.get()},
-                    {"label": "祓串", "value": self.var_haraegushi.get(), "max": self.var_haraegushi.get()},
-                    {"label": "注連鋼縄", "value": self.var_shimenawa.get(), "max": self.var_shimenawa.get()},
-                    {"label": "呪瘤檀", "value": self.var_juryudan.get(), "max": self.var_juryudan.get()},
-                    {"label": "医霊器具", "value": self.var_ireikigu.get(), "max": self.var_ireikigu.get()},
-                    {"label": "名伏", "value": self.var_meifuku.get(), "max": self.var_meifuku.get()},
-                    {"label": "術延起点", "value": self.var_jutsuyen.get(), "max": self.var_jutsuyen.get()},
-                ],
-                "params": [
-                    {"label": "体", "value": str(self.var_body.get())},
-                    {"label": "霊", "value": str(self.var_soul.get())},
-                    {"label": "巧", "value": str(self.var_skill.get())},
-                    {"label": "術", "value": str(self.var_magic.get())},
-                    {"label": "機動力", "value": str(self.var_mobility.get())},
-                    {"label": "装甲", "value": str(self.var_armor.get())},
-                ],
+                "commands": _build_ccfolia_commands(sheet),
+                "status": status,
+                "params": params,
             },
         }
 
@@ -418,79 +446,6 @@ class TacticalExorcistCharMaker(tk.Tk):
             "ココフォリアの画面を開いて Ctrl+V (貼り付け) を押すだけで、\n"
             "見やすいチャットパレット付きの駒が生成されます。",
         )
-
-
-# ── CCFolia コマンド文字列ビルダー ────────────────────────────────────────────
-
-def _build_ccfolia_commands(char_data: dict) -> str:
-    """キャラクターデータからCCFolia用チャットパレットコマンド文字列を生成する。"""
-    lines: list[str] = []
-
-    lines.append("◆能力値を使った判定◆")
-    lines.append("{体}b6=>4  //【体】判定")
-    lines.append("{霊}b6=>4  //【霊】判定")
-    lines.append("{巧}b6=>4  //【巧】判定")
-    lines.append("{術}b6=>4  //【術】判定")
-    lines.append("")
-
-    lines.append("◆戦闘中用の判定◆")
-    lines.append("{巧}b6=>4  //戦術機動")
-    lines.append("({体})b6=>4  //近接攻撃")
-    lines.append("({巧})b6=>4  //遠隔攻撃")
-    lines.append("({霊})b6=>4  //霊的攻撃")
-    lines.append("({術})b6=>4  //術発動")
-    lines.append("")
-
-    lines.append("2d6  //ダメージ")
-    lines.append("1d3  //霊的ダメージ")
-    lines.append("b6=>4  //回避判定")
-    lines.append("")
-
-    lines.append("C({体力})  //残り体力")
-    lines.append("C({霊力})  //残り霊力")
-    lines.append("")
-
-    lines.append("◆支給装備◆")
-    lines.append(
-        "【形代】：キャラクターが「死亡」した時、①【形代】を1つ消費することで「死亡」を回避する"
-        "②【体力】【霊力】を半分まで回復した状態でマップ上の「リスポーン地点」にキャラクターを戻す。"
-        "　また、手番中に好きなタイミングで【形代】を1つ消費することで、キャラクターは【霊力】を2点回復することができる。"
-    )
-    lines.append("")
-    lines.append(
-        "【祓串】：1つ消費することで自身を中心とした7*7マスのどこかに配置するか、"
-        "近接攻撃または遠隔攻撃に使用できる。近接攻撃に使用した場合は1d6点、"
-        "遠隔攻撃に使用した場合は3点の「物理ダメージ」を与える。"
-    )
-    lines.append("")
-    lines.append(
-        "【注連鋼縄】：3つ消費することで、【巧】の値を参照してマップ上に設置する。"
-        "結界に関するルールは2-7：結界の設置についてを参照。"
-    )
-    lines.append("")
-    lines.append(
-        "【呪瘤檀】：攻撃の代わりにこのアイテムを使用する。"
-        "自分を中心とした5＊5マスのいずれかのマス1つを「中心」に定め、"
-        "「中心」と隣接する3＊3のマスにいるキャラクター全員に2点の霊的ダメージを与える（回避は『難易度：NORMAL』）。"
-    )
-    lines.append("")
-
-    skills = char_data.get("skills", [])
-    if skills:
-        lines.append("◆特技◆")
-        for skill in skills:
-            lines.append(f"【{skill.get('name', '')}】：{skill.get('description', '')}")
-            lines.append("")
-
-    weapons = char_data.get("weapons", [])
-    if weapons:
-        lines.append("◆攻撃祭具◆")
-        for weapon in weapons:
-            lines.append(f"【{weapon.get('name', '')}】：{weapon.get('description', '')}")
-            lines.append("")
-
-    lines.append("[Credit: 非公式タクティカル祓魔師キャラクターシートVer0.8 著作者様]")
-    return "\n".join(lines)
 
 
 # ── エントリポイント ──────────────────────────────────────────────────────────

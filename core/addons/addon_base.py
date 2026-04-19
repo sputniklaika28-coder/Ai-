@@ -92,6 +92,47 @@ class RuleSystemAddon(AddonBase):
         """キャラクターシートを自然言語に解釈する。"""
         return ""
 
+    # ──────────────────────────────────────────
+    # キャラクター汎用フック（CharacterService が使用）
+    # ──────────────────────────────────────────
+
+    def get_character_sheet_template(self) -> dict:
+        """このシステムの空のシートテンプレートを返す。
+
+        CharacterService が新規キャラクター作成時のデフォルト値として使う。
+        """
+        return {"name": "", "memo": "", "skills": [], "weapons": []}
+
+    def get_character_generation_schema(self) -> type:
+        """AI 構造化生成に使う Pydantic モデルクラスを返す。
+
+        デフォルトは汎用の CharacterConceptOutput を返す。
+        各システムが固有のシートを直接出力させたい場合はオーバーライドする。
+        """
+        from core.schemas import CharacterConceptOutput
+
+        return CharacterConceptOutput
+
+    def build_vtt_piece_data(self, sheet: dict) -> dict:
+        """シート dict から VTT（CCFolia）貼り付け用ペイロードを構築する。
+
+        戻り値は {"kind": "character", "data": {...}} 形式。
+        デフォルトは最小限（name のみ）のペイロード。
+        """
+        name = sheet.get("name") or "名無し"
+        memo = sheet.get("memo", "")
+        return {
+            "kind": "character",
+            "data": {
+                "name": name,
+                "initiative": 0,
+                "memo": memo,
+                "commands": "",
+                "status": [],
+                "params": [],
+            },
+        }
+
 
 class ToolAddon(AddonBase):
     """ツールアドオンの拡張基底クラス。
