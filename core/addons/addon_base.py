@@ -80,6 +80,10 @@ class RuleSystemAddon(AddonBase):
         """世界観設定テキストを返す。"""
         return ""
 
+    def get_world_setting_json(self) -> dict | None:
+        """構造化された世界観設定 (JSON) を返す。None でデータなし。"""
+        return None
+
     def get_phase_keywords(self) -> dict[str, list[str]]:
         """フェイズ検出キーワードを返す。{phase_name: [keywords...]}"""
         return {}

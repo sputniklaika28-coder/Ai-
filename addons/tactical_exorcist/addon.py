@@ -51,8 +51,10 @@ class TacticalExorcistAddon(RuleSystemAddon):
 
     def on_load(self, context: AddonContext) -> None:
         self._root = self.addon_dir
+        self._configs_dir: Path = context.root_dir / "configs"
         self._prompts: dict | None = None
         self._world_setting: str = ""
+        self._world_setting_json: dict | None = None
         self._generator = None
         self._lm_client = context.lm_client
 
@@ -66,15 +68,28 @@ class TacticalExorcistAddon(RuleSystemAddon):
             except Exception as e:
                 logger.warning("プロンプト読み込み失敗: %s", e)
 
-        # 世界観設定読み込み
+        # 世界観設定 (圧縮テキスト) 読み込み: configs/ 配下を参照する
         ws_filename = self.manifest.world_setting or "world_setting_compressed.txt"
-        ws_path = self._root / ws_filename
+        ws_path = self._configs_dir / ws_filename
         if ws_path.exists():
             try:
                 self._world_setting = ws_path.read_text(encoding="utf-8")
                 logger.info("世界観設定読み込み: %s (%d文字)", ws_path, len(self._world_setting))
             except Exception as e:
                 logger.warning("世界観設定読み込み失敗: %s", e)
+        else:
+            logger.warning("世界観設定ファイルが見つかりません: %s", ws_path)
+
+        # 世界観設定 (構造化 JSON) 読み込み: configs/ 配下を参照する
+        ws_json_filename = self.manifest.world_setting_json or "world_setting.json"
+        ws_json_path = self._configs_dir / ws_json_filename
+        if ws_json_path.exists():
+            try:
+                with open(ws_json_path, encoding="utf-8") as f:
+                    self._world_setting_json = json.load(f)
+                logger.info("世界観JSON読み込み: %s", ws_json_path)
+            except Exception as e:
+                logger.warning("世界観JSON読み込み失敗: %s", e)
 
         # 専用ジェネレーター読み込み
         try:
@@ -105,6 +120,9 @@ class TacticalExorcistAddon(RuleSystemAddon):
 
     def get_world_setting(self) -> str:
         return self._world_setting
+
+    def get_world_setting_json(self) -> dict | None:
+        return self._world_setting_json
 
     def get_phase_keywords(self) -> dict[str, list[str]]:
         return self.PHASE_KEYWORDS
