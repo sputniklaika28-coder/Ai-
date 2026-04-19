@@ -10,5 +10,6 @@
   "class_name": "TacticalExorcistAddon",
   "prompts_override": "prompts.json",
   "world_setting": "world_setting_compressed.txt",
+  "world_setting_json": "world_setting.json",
   "characters": "characters.json"
 }

@@ -28,7 +28,12 @@ class AddonManifest(BaseModel):
         default=None, description="プロンプト定義ファイル (相対パス)"
     )
     world_setting: str | None = Field(
-        default=None, description="世界観設定ファイル (相対パス)"
+        default=None,
+        description="世界観設定テキストファイル名。configs/ からの相対パスとして解決する。",
+    )
+    world_setting_json: str | None = Field(
+        default=None,
+        description="世界観設定 JSON ファイル名。configs/ からの相対パスとして解決する。",
     )
     characters: str | None = Field(
         default=None, description="キャラクター定義ファイル (相対パス)"
