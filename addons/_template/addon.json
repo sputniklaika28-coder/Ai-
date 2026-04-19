@@ -1,0 +1,14 @@
+{
+  "id": "your_system_id",
+  "name": "システム名（例: ダブルクロス）",
+  "version": "1.0.0",
+  "type": "rule_system",
+  "description": "システムの概要説明",
+  "author": "あなたの名前",
+  "dependencies": ["character_manager", "session_manager"],
+  "entry_point": "addon.py",
+  "class_name": "YourSystemAddon",
+  "prompts_override": "prompts.json",
+  "world_setting": "world_setting.txt",
+  "characters": "characters.json"
+}

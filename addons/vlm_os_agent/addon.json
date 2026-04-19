@@ -1,0 +1,20 @@
+{
+  "id": "vlm_os_agent",
+  "name": "VLM OS Agent",
+  "version": "0.1.0",
+  "type": "tool",
+  "description": "VLM駆動のOS級自律エージェント（起動中のココフォリア・デスクトップ版等をスクショ→VLM→クリック／キー入力で操作。完全ローカル）",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "VlmOsAgentAddon",
+  "tools": [
+    "os_screenshot",
+    "os_find_element",
+    "os_click_element",
+    "os_type_text",
+    "os_run_task"
+  ],
+  "gui_tab": "VlmOsAgentTab",
+  "gui_tab_label": "VLM OS Agent"
+}

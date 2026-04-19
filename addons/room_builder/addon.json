@@ -1,0 +1,19 @@
+{
+  "id": "room_builder",
+  "name": "ルームビルダー",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "CCFoliaルームの自動構築 — 背景・BGM・キャラクター一括配置",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "RoomBuilderAddon",
+  "tools": [
+    "build_room",
+    "set_room_background",
+    "add_room_bgm",
+    "place_room_character",
+    "enter_build_mode",
+    "exit_build_mode"
+  ]
+}

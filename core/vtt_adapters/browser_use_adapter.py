@@ -43,16 +43,18 @@ class BrowserUseVTTAdapter(BaseVTTAdapter):
 
     def __init__(
         self,
-        model_name: str = "gpt-4o",
+        model_name: str = "",
         api_key: str = "",
-        provider: str = "openai",
+        provider: str = "local",
         headless: bool = False,
+        lm_studio_url: str = "http://localhost:1234",
     ) -> None:
         self._agent = BrowserUseAgentWrapper(
             model_name=model_name,
             api_key=api_key,
             provider=provider,
             headless=headless,
+            lm_studio_url=lm_studio_url,
         )
         self._page: object | None = None
         self._room_url: str = ""
@@ -61,8 +63,17 @@ class BrowserUseVTTAdapter(BaseVTTAdapter):
     # 接続 / 切断
     # ──────────────────────────────────────────
 
-    def connect(self, room_url: str, headless: bool = False) -> None:
+    def connect(self, room_url: str, headless: bool = False,
+                cdp_url: str | None = None,
+                mode: str = "persistent",
+                profile_dir: str | None = None,
+                channel: str | None = None) -> None:
         """Browser Use でブラウザを起動し、VTT ルームに接続する。"""
+        if cdp_url:
+            logger.warning(
+                "BrowserUseVTTAdapter はCDP接続に対応していません。"
+                "通常モードで接続します。"
+            )
         self._room_url = room_url
         result = self._agent.run_task_sync(
             f"ブラウザで以下のURLにアクセスしてください: {room_url}\n"
@@ -273,6 +284,6 @@ class BrowserUseVTTAdapter(BaseVTTAdapter):
         return VisionCanvasController(
             page=self.page,
             cloud_api_key=cfg.get("openai_api_key", ""),
-            cloud_model=cfg.get("vlm_model", "gpt-4o"),
-            vlm_provider=cfg.get("vlm_provider", "openai"),
+            cloud_model=cfg.get("vlm_model", ""),
+            vlm_provider=cfg.get("vlm_provider", "local"),
         )

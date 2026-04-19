@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
+import logging
 import re
+from typing import TYPE_CHECKING, Type, TypeVar
 
-import requests
+import httpx
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel as _BaseModel
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class LMClient:
@@ -12,19 +22,25 @@ class LMClient:
         self.base_url = base_url
         self.model = model
 
-    def is_server_running(self) -> bool:
+    async def is_server_running(self) -> bool:
         try:
-            response = requests.get(f"{self.base_url}/v1/models", timeout=3)
+            async with httpx.AsyncClient(timeout=3) as client:
+                response = await client.get(f"{self.base_url}/v1/models")
             return response.status_code == 200
         except Exception:
             return False
+
+    def _strip_think_tags(self, text: str) -> str:
+        """<think>...</think> タグを除去して後続テキストを返す。"""
+        if "</think>" in text:
+            text = text.split("</think>")[-1].strip()
+        return text
 
     def _clean_response(self, text: str) -> str:
         """AIの余計な独り言や思考プロセスを完全に削ぎ落とし、純粋なJSONだけを抽出する"""
 
         # 1. もし <think> タグが含まれていたら、その後ろだけを切り出す
-        if "</think>" in text:
-            text = text.split("</think>")[-1]
+        text = self._strip_think_tags(text)
 
         # 2. 「思考プロセス：」などの日本語の独り言が含まれていた場合、
         #    最初の `{` が出現するまでの文字をすべてゴミとして切り捨てる
@@ -112,7 +128,7 @@ class LMClient:
         thinking_ignored = not raw_content.strip() and has_reasoning
         return raw_content, thinking_ignored, finish_reason, content_was_empty
 
-    def generate_response(
+    async def generate_response(
         self,
         system_prompt: str,
         user_message: str,
@@ -125,19 +141,13 @@ class LMClient:
         repetition_penalty: float = 1.0,
         min_p: float = 0.0,
         no_think: bool = False,
+        json_mode: bool = False,
     ):
-        if not self.is_server_running():
+        if not await self.is_server_running():
             return None, None
 
-        # Qwen3系などの思考モデルで思考を抑制する
-        # chat_template_kwargs でllama.cpp/LM Studioに指示し、
-        # システムプロンプト先頭の /no_think でモデルにも直接指示する
-        effective_system = system_prompt
-        if no_think:
-            effective_system = "/no_think\n" + system_prompt
-
         messages = [
-            {"role": "system", "content": effective_system},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
 
@@ -157,89 +167,45 @@ class LMClient:
         }
         if no_think:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
 
         try:
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions", json=payload, timeout=timeout
-            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/chat/completions", json=payload
+                )
             if response.status_code == 200:
                 result = response.json()
-                raw_content, thinking_ignored, finish_reason, content_was_empty = (
+                raw_content, _, finish_reason, content_was_empty = (
                     self._extract_content(result)
                 )
-                # tool_calls はリトライで更新される可能性があるため、最新のレスポンスを追跡する
                 active_result = result
 
-                # reasoning_content から有効な JSON を抽出済みなら
-                # content は補完されているのでリトライ不要
+                # reasoning_content から有効な JSON を抽出済みならリトライ不要
                 json_recovered = content_was_empty and bool(raw_content.strip())
 
-                # リトライ判定:
-                # 1. no_think が無視されて content が空（思考トークンで消費しきった）
-                # 2. finish_reason=length で元の content が空（トークン上限到達）
-                # ただし reasoning から JSON 抽出に成功した場合はスキップ
+                # リトライ判定: finish_reason=length で content が空の場合のみ
                 needs_retry = not json_recovered and (
-                    (thinking_ignored and no_think)
-                    or (finish_reason == "length" and content_was_empty)
+                    finish_reason == "length" and content_was_empty
                 )
 
                 if needs_retry:
-                    # 思考トークンが全バジェットを消費している可能性が高いため、
-                    # リトライでは思考を明示的に抑制してコンテンツ生成に集中させる
-                    print("DEBUG: content空検出 → 思考抑制+max_tokens×2でリトライ")
-                    retry_messages = [
-                        {"role": "system", "content": "/no_think\n" + system_prompt},
-                        {"role": "user", "content": user_message},
-                    ]
+                    print("DEBUG: content空(length) → max_tokens×2でリトライ")
                     retry_payload = {
                         **payload,
-                        "messages": retry_messages,
                         "max_tokens": max_tokens * 2,
-                        "chat_template_kwargs": {"enable_thinking": False},
                     }
-                    retry_resp = requests.post(
-                        f"{self.base_url}/v1/chat/completions",
-                        json=retry_payload,
-                        timeout=timeout,
-                    )
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        retry_resp = await client.post(
+                            f"{self.base_url}/v1/chat/completions",
+                            json=retry_payload,
+                        )
                     if retry_resp.status_code == 200:
                         retry_result = retry_resp.json()
                         active_result = retry_result
-                        raw_content, still_ignored, retry_finish, retry_empty = (
-                            self._extract_content(retry_result)
-                        )
+                        raw_content, _, _, _ = self._extract_content(retry_result)
 
-                        # それでもダメなら最終リトライ
-                        # ・max_tokens を ×4 に拡大（思考+出力の両方に十分な余裕）
-                        # ・temperature を微増して決定論的な失敗ループを回避
-                        # ・思考抑制を維持してコンテンツ出力を最優先
-                        still_needs_retry = still_ignored or (
-                            retry_finish == "length" and retry_empty
-                        )
-                        if still_needs_retry:
-                            print("DEBUG: リトライも空 → 思考抑制+max_tokens×4で最終リトライ")
-                            final_messages = [
-                                {"role": "system", "content": "/no_think\n" + system_prompt},
-                                {"role": "user", "content": user_message},
-                            ]
-                            final_payload = {
-                                **payload,
-                                "messages": final_messages,
-                                "max_tokens": max_tokens * 4,
-                                "temperature": min(temperature + 0.1, 1.0),
-                                "chat_template_kwargs": {"enable_thinking": False},
-                            }
-                            final_resp = requests.post(
-                                f"{self.base_url}/v1/chat/completions",
-                                json=final_payload,
-                                timeout=timeout,
-                            )
-                            if final_resp.status_code == 200:
-                                final_result = final_resp.json()
-                                active_result = final_result
-                                raw_content, _, _, _ = self._extract_content(final_result)
-
-                # ログを見ると、AIがJSONの中にさらに思考を書き込んでいる場合があるため、クリーン処理にかける
                 content = self._clean_response(raw_content)
                 tool_calls = active_result["choices"][0]["message"].get("tool_calls") or None
 
@@ -249,7 +215,113 @@ class LMClient:
             print(f"   ⚠️  LM-Studio通信エラー: {str(e)}")
             return None, None
 
-    def generate_with_tools(
+    def generate_response_sync(self, *args, **kwargs):
+        """threading 環境からの呼び出し用同期ラッパー。"""
+        return asyncio.run(self.generate_response(*args, **kwargs))
+
+    def is_server_running_sync(self) -> bool:
+        """threading 環境からの呼び出し用同期ラッパー。"""
+        return asyncio.run(self.is_server_running())
+
+    async def generate_structured(
+        self,
+        system_prompt: str,
+        user_message: str,
+        schema: "Type[_T]",
+        *,
+        temperature: float = 0.3,
+        max_tokens: int = 500,
+        timeout: int | None = 120,
+        strict: bool = True,
+    ) -> "_T | None":
+        """Pydantic スキーマを用いた構造化出力生成。
+
+        OpenAI json_schema モードでモデルレベルの JSON 整合性を強制する。
+        正規表現・ブルートフォース探索は一切使用しない。
+
+        Args:
+            system_prompt: システムプロンプト。
+            user_message: ユーザーメッセージ。
+            schema: 期待する Pydantic v2 モデルクラス。
+            temperature: 生成温度（構造化出力は低めを推奨）。
+            max_tokens: 最大トークン数。
+            timeout: タイムアウト（秒）。
+            strict: json_schema の strict モード（True推奨）。
+
+        Returns:
+            バリデーション済みの Pydantic モデルインスタンス。
+            失敗した場合は None。
+        """
+        from pydantic import BaseModel, ValidationError
+
+        if not await self.is_server_running():
+            return None
+
+        json_schema = schema.model_json_schema()  # type: ignore[attr-defined]
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.__name__,
+                    "schema": json_schema,
+                    "strict": strict,
+                },
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/chat/completions", json=payload
+                )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "generate_structured: HTTP %d — %s",
+                    response.status_code,
+                    response.text[:200],
+                )
+                return None
+
+            result = response.json()
+            message = result["choices"][0]["message"]
+            raw_content = message.get("content") or ""
+
+            # 推論モデル: content が空の場合 reasoning_content から JSON を探す
+            if not raw_content.strip():
+                reasoning = (message.get("reasoning_content") or "").strip()
+                if reasoning:
+                    found = self._find_json_in_text(reasoning)
+                    if found:
+                        raw_content = found
+
+            if not raw_content.strip():
+                logger.warning("generate_structured: empty content for %s", schema.__name__)
+                return None
+
+            return schema.model_validate_json(raw_content)  # type: ignore[attr-defined]
+
+        except ValidationError as e:
+            logger.warning("generate_structured: ValidationError for %s: %s", schema.__name__, e)
+            return None
+        except Exception as e:
+            logger.error("generate_structured エラー (%s): %s", schema.__name__, e)
+            return None
+
+    def generate_structured_sync(self, *args, **kwargs) -> "_T | None":
+        """threading 環境からの呼び出し用同期ラッパー。"""
+        return asyncio.run(self.generate_structured(*args, **kwargs))
+
+    async def generate_with_tools(
         self,
         messages: list[dict],
         tools: list[dict],
@@ -273,7 +345,7 @@ class LMClient:
             - content: モデルの出力テキスト（tool_callsがある場合は思考テキスト）。
             - tool_calls: ツール呼び出しリスト。呼び出しがない場合はNone。
         """
-        if not self.is_server_running():
+        if not await self.is_server_running():
             return None, None
 
         # メッセージを深コピーして画像を追加
@@ -310,11 +382,11 @@ class LMClient:
             payload["tool_choice"] = "auto"
 
         try:
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                json=payload,
-                timeout=timeout,
-            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                )
             if response.status_code == 200:
                 result = response.json()
                 message = result["choices"][0]["message"]
@@ -322,8 +394,7 @@ class LMClient:
                 tool_calls = message.get("tool_calls") or None
 
                 # <think> タグがある場合はクリーンアップ
-                if content and "</think>" in content:
-                    content = content.split("</think>")[-1].strip()
+                content = self._strip_think_tags(content)
 
                 return content or None, tool_calls
             return None, None

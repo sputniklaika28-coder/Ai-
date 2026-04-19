@@ -1,0 +1,16 @@
+{
+  "id": "vision_tools",
+  "name": "Vision盤面解析",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "VLMによる盤面の視覚的解析・駒配置・シーン描写",
+  "author": "core",
+  "dependencies": [],
+  "entry_point": "addon.py",
+  "class_name": "VisionToolsAddon",
+  "tools": [
+    "analyze_board_vision",
+    "place_piece_at_location",
+    "describe_board_scene"
+  ]
+}

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -18,6 +19,7 @@ import sys
 import threading
 import time
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # stdout をバッファリングなしにする（クラッシュ時にもログが表示されるように）
@@ -36,8 +38,13 @@ from character_manager import CharacterManager
 from knowledge_manager import KnowledgeManager
 from lm_client import LMClient
 from main import PromptManager
+from memory_manager import MemoryManager
 from session_manager import SessionManager
 from vtt_adapters.ccfolia_adapter import CCFoliaAdapter
+
+# アドオンフレームワーク
+sys.path.insert(0, str(_ROOT_DIR))
+from core.addons import AddonContext, AddonManager, ToolExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -295,11 +302,93 @@ COPILOT_TOOLS: list[dict] = [
     },
 ]
 
+HEALTH_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_health",
+            "description": "システム稼働状態を確認する（VTT接続・LM・ビルド状態）",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
+BUILD_MODE_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "enter_build_mode",
+            "description": "ビルドモードに入る（RP停止、部屋構築専念）",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exit_build_mode",
+            "description": "ビルドモードを終了する（RP再開）",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
 # 全ツール結合
 ALL_TOOLS: list[dict] = (
     AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS
     + ASSET_TOOLS + VISION_TOOLS + ROOM_TOOLS + COPILOT_TOOLS
+    + HEALTH_TOOLS + BUILD_MODE_TOOLS
 )
+
+
+# ==========================================
+# ビルドモード・システムヘルス
+# ==========================================
+
+
+@dataclass
+class BuildModeStatus:
+    """ビルドモードの状態管理。ビルド中はRP機能を停止する。"""
+
+    is_active: bool = False
+    current_step: str = ""
+    completed_steps: int = 0
+    total_steps: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    def reset(self) -> None:
+        self.is_active = False
+        self.current_step = ""
+        self.completed_steps = 0
+        self.total_steps = 0
+        self.errors = []
+
+
+@dataclass
+class SystemHealthStatus:
+    """システム全体の稼働状態。"""
+
+    vtt_connected: bool = False
+    vtt_mode: str = "disconnected"  # "disconnected" | "persistent" | "playwright" | "cdp" | "browser_use" | "foundry" | "vision"
+    lm_reachable: bool = False
+    build_mode: str = "idle"  # "idle" | "building"
+    room_url: str = ""
+
+    def to_display(self) -> str:
+        ok, ng = "○", "×"
+        return (
+            f"VTT: {ok if self.vtt_connected else ng} ({self.vtt_mode}) | "
+            f"LM: {ok if self.lm_reachable else ng} | "
+            f"ビルド: {self.build_mode}"
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "vtt_connected": self.vtt_connected,
+            "vtt_mode": self.vtt_mode,
+            "lm_reachable": self.lm_reachable,
+            "build_mode": self.build_mode,
+            "room_url": self.room_url,
+        }
 
 
 # ==========================================
@@ -353,9 +442,24 @@ class SessionContext:
         "free": 0, "briefing": 1, "mission": 2, "combat": 3, "assessment": 4
     }
 
-    def __init__(self) -> None:
+    def __init__(self, lm_client=None) -> None:
         self.phase: str = "free"
-        self.history: list[dict] = []
+        # MemoryManager で履歴を管理（ローリング要約対応）
+        self._memory = MemoryManager(lm_client=lm_client)
+
+    def attach_lm_client(self, lm_client) -> None:
+        """起動後に LMClient を注入する（遅延初期化用）。"""
+        self._memory.lm_client = lm_client
+
+    def set_phase_keywords(self, keywords: dict[str, list[str]]) -> None:
+        """ルールアドオンからフェイズキーワードを動的に設定する。"""
+        if keywords:
+            self._PHASE_KEYWORDS = keywords
+
+    @property
+    def history(self) -> list[dict]:
+        """後方互換: 直近メッセージのリストを返す。"""
+        return self._memory.get_recent_messages()
 
     def update_phase(self, body: str, is_ai: bool = False) -> None:
         if is_ai:
@@ -369,13 +473,12 @@ class SessionContext:
             self.phase = new_phase
 
     def add_message(self, speaker: str, body: str, is_ai: bool = False) -> None:
-        self.history.append({"speaker": speaker, "body": body})
-        self.history = self.history[-100:]
+        self._memory.add_message(speaker, body)
         self.update_phase(body, is_ai)
 
     def get_context_summary(self) -> str:
-        lines = [f"[{m['speaker']}]: {m['body']}" for m in self.history[-25:]]
-        return f"【フェイズ: {self.phase.upper()}】\n【直近の会話】\n" + "\n".join(lines)
+        ctx = self._memory.get_context_window()
+        return f"【フェイズ: {self.phase.upper()}】\n{ctx}" if ctx else f"【フェイズ: {self.phase.upper()}】"
 
 
 # ==========================================
@@ -395,18 +498,28 @@ class CCFoliaConnector:
         headless: bool = False,
         poll_interval: float | None = None,
         use_browser_use: bool = False,
+        cdp_url: str | None = None,
+        browser_mode: str = "persistent",
+        profile_dir: str | None = None,
+        browser_channel: str | None = None,
     ) -> None:
         self.room_url = room_url
         self.poll_interval = poll_interval or self.POLL_INTERVAL
         self.headless = headless
         self._use_browser_use = use_browser_use
+        self.cdp_url = cdp_url
+        # CDP URL が明示指定されたら browser_mode に関わらず cdp 優先
+        self.browser_mode = "cdp" if cdp_url else browser_mode
+        self.profile_dir = profile_dir
+        self.browser_channel = browser_channel
 
         self.lm_client = LMClient()
         # 設定ファイルは常にリポジトリルート基準の絶対パスで解決する
         self.cm = CharacterManager(str(_ROOT_DIR / "configs" / "characters.json"))
         self.pm = PromptManager(str(_ROOT_DIR / "configs" / "prompts.json"))
         self.detector = CharacterDetector(self.cm, default_id=default_character_id)
-        self.ctx = SessionContext()
+        # SessionContext に LMClient を注入してローリング要約を有効化
+        self.ctx = SessionContext(lm_client=self.lm_client)
         self.sm = SessionManager(_ROOT_DIR)
         self.world_setting = self._load_world_setting()
 
@@ -426,13 +539,108 @@ class CCFoliaConnector:
         # セッション・コパイロット（Phase 4）
         self._copilot: object | None = None
 
+        # GMDirector 直接統合（Phase 5）
+        self._gm_director: object | None = None
+        self._entity_tracker: object | None = None
+        self._entity_path: Path | None = None
+
+        # ビルドモード・システムヘルス
+        self._build_status = BuildModeStatus()
+        self._health = SystemHealthStatus(room_url=room_url)
+
+        # アドオンマネージャー
+        self.addon_manager = AddonManager(
+            addons_dir=_ROOT_DIR / "addons",
+            core_dir=_CORE_DIR,
+        )
+
+        # async/sync ブリッジ用の専用イベントループ（バックグラウンドスレッドで実行）
+        self._async_loop = asyncio.new_event_loop()
+        self._async_thread = threading.Thread(
+            target=self._async_loop.run_forever, daemon=True, name="AsyncBridge"
+        )
+        self._async_thread.start()
+
+    # ──────────────────────────────────────────
+    # async/sync ブリッジ
+    # ──────────────────────────────────────────
+
+    def _run_async(self, coro):
+        """バックグラウンドの asyncio ループでコルーチンを実行し、結果を返す。
+
+        Playwright（非スレッドセーフ）を同期コードから安全に呼び出すための橋渡し。
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self._async_loop)
+        return future.result()
+
     # ──────────────────────────────────────────
     # 初期化 / 終了
     # ──────────────────────────────────────────
 
     def _init_adapter(self) -> None:
-        """VTTアダプターを初期化してCCFoliaに接続する。"""
-        if self._use_browser_use:
+        """VTTアダプターを初期化して VTT に接続する。
+
+        VTT_BACKEND 環境変数で接続方式を切り替える:
+          foundry  → Foundry VTT REST API（ブラウザ不要）
+          vision   → VLM + pyautogui 視覚制御（任意 VTT 対応）
+          ccfolia  → CCFolia Playwright 操作（既存・デフォルト）
+        """
+        try:
+            from config import get_vtt_backend, get_foundry_url, get_foundry_api_key
+            from config import get_vision_vtt_window, get_vision_vtt_grid_size
+            from config import get_vision_vtt_chat_region, get_vision_vtt_board_region
+        except ModuleNotFoundError:
+            from core.config import get_vtt_backend, get_foundry_url, get_foundry_api_key  # type: ignore
+            from core.config import get_vision_vtt_window, get_vision_vtt_grid_size  # type: ignore
+            from core.config import get_vision_vtt_chat_region, get_vision_vtt_board_region  # type: ignore
+
+        vtt_backend = get_vtt_backend()
+
+        if vtt_backend == "foundry":
+            print("⏳ Foundry VTT REST API に接続しています...")
+            try:
+                from vtt_adapters.foundry_adapter import FoundryVTTAdapter
+            except ModuleNotFoundError:
+                from core.vtt_adapters.foundry_adapter import FoundryVTTAdapter  # type: ignore
+            self.adapter = FoundryVTTAdapter(
+                base_url=get_foundry_url(),
+                api_key=get_foundry_api_key(),
+            )
+            self._run_async(self.adapter.connect(self.room_url))
+            self._health.vtt_mode = "foundry"
+            print(f"✓ Foundry VTT に接続: {get_foundry_url()}")
+            self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
+            self._health.vtt_connected = True
+            return
+
+        if vtt_backend == "vision":
+            print("⏳ VisionVTT アダプター（VLM 視覚制御）を起動しています...")
+            try:
+                from vtt_adapters.vision_adapter import VisionVTTAdapter
+            except ModuleNotFoundError:
+                from core.vtt_adapters.vision_adapter import VisionVTTAdapter  # type: ignore
+            self.adapter = VisionVTTAdapter(
+                lm_client=self.lm_client,
+                window_title=get_vision_vtt_window(),
+                grid_size=get_vision_vtt_grid_size(),
+                chat_region=get_vision_vtt_chat_region(),
+                board_region=get_vision_vtt_board_region(),
+            )
+            self._run_async(self.adapter.connect(self.room_url))
+            self._health.vtt_mode = "vision"
+            print(f"✓ VisionVTT 起動 (ウィンドウ: '{get_vision_vtt_window() or 'プライマリモニタ全体'}')")
+            self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
+            self._health.vtt_connected = True
+            return
+
+        # ── ccfolia バックエンド ────────────────
+        if self.browser_mode == "cdp":
+            cdp_url = self.cdp_url or "http://localhost:9222"
+            print(f"⏳ 既存ブラウザにCDP接続しています... ({cdp_url})")
+            self.adapter = CCFoliaAdapter()
+            self._run_async(self.adapter.connect(self.room_url, cdp_url=cdp_url))
+            self._health.vtt_mode = "cdp"
+        elif self._use_browser_use:
             print("⏳ Browser Use でブラウザを起動しています...")
             try:
                 from config import load_config
@@ -441,21 +649,53 @@ class CCFoliaConnector:
                 from core.config import load_config
                 from core.vtt_adapters.browser_use_adapter import BrowserUseVTTAdapter
             cfg = load_config()
-            api_key = cfg["openai_api_key"] or cfg["anthropic_api_key"]
-            provider = "anthropic" if cfg["anthropic_api_key"] and not cfg["openai_api_key"] else "openai"
+            provider = cfg.get("browser_use_provider", "local")
+            api_key = ""
+            if provider == "anthropic":
+                api_key = cfg["anthropic_api_key"]
+            elif provider == "openai":
+                api_key = cfg["openai_api_key"]
+            # provider == "local" の場合は api_key 不要
             self.adapter = BrowserUseVTTAdapter(
                 model_name=cfg["browser_use_model"],
                 api_key=api_key,
                 provider=provider,
                 headless=self.headless,
+                lm_studio_url=cfg.get("lm_studio_url", "http://localhost:1234"),
             )
-        else:
-            print("⏳ Playwright でブラウザを起動しています...")
+            self._run_async(self.adapter.connect(self.room_url, headless=self.headless))
+            self._health.vtt_mode = "browser_use"
+        elif self.browser_mode == "persistent":
+            print("⏳ 永続プロファイルでCCFoliaに接続しています（CDP不要）...")
             self.adapter = CCFoliaAdapter()
-        self.adapter.connect(self.room_url, headless=self.headless)
+            self._run_async(self.adapter.connect(
+                self.room_url,
+                headless=self.headless,
+                mode="persistent",
+                profile_dir=self.profile_dir,
+                channel=self.browser_channel,
+            ))
+            self._health.vtt_mode = "persistent"
+        else:
+            # fresh モード（従来の新規Chromium起動）
+            print("⏳ Playwright で新規ブラウザを起動しています...")
+            self.adapter = CCFoliaAdapter()
+            self._run_async(self.adapter.connect(
+                self.room_url,
+                headless=self.headless,
+                mode="fresh",
+            ))
+            self._health.vtt_mode = "playwright"
+
         self.map_ctrl = CCFoliaMapController(adapter=self.adapter)
-        mode = "Browser Use" if self._use_browser_use else "Playwright"
-        print(f"✓ CCFoliaに接続 ({mode}): {self.room_url}")
+        self._health.vtt_connected = True
+        mode_label = {
+            "cdp": "CDP",
+            "browser_use": "Browser Use",
+            "playwright": "Playwright(新規)",
+            "persistent": "Playwright(永続プロファイル)",
+        }.get(self._health.vtt_mode, self._health.vtt_mode)
+        print(f"✓ CCFoliaに接続 ({mode_label}): {self.room_url}")
 
     def _init_copilot(self) -> None:
         """SessionCoPilot を初期化する。"""
@@ -471,6 +711,86 @@ class CCFoliaConnector:
         except Exception as e:
             logger.warning("SessionCoPilot 初期化エラー: %s", e)
 
+    def _init_gm_director(self) -> None:
+        """GMDirector をコネクター直下に初期化し、アドオンと状態を共有する。"""
+        try:
+            from core.entity_tracker import EntityTracker
+            from core.game_state import GameState
+            from core.gm_director import GMDirector, GMDirectorConfig
+
+            gm_addon = self._get_gm_director_addon()
+            if gm_addon and getattr(gm_addon, '_entities', None):
+                self._entity_tracker = gm_addon._entities
+            else:
+                self._entity_tracker = EntityTracker()
+
+            game_state = self._get_game_state_from_addons()
+
+            session_dir = getattr(self.sm, 'current_session_dir', None)
+            if session_dir:
+                self._entity_path = Path(session_dir) / "entities.json"
+
+            config = GMDirectorConfig(
+                auto_resolve_combat=True,
+                inject_game_state=True,
+                inject_entities=True,
+                inject_memory=True,
+                auto_extract_entities=True,
+            )
+            self._gm_director = GMDirector(
+                lm_client=self.lm_client,
+                game_state=game_state,
+                entity_tracker=self._entity_tracker,
+                config=config,
+                memory_manager=self.ctx._memory,
+            )
+
+            if gm_addon:
+                gm_addon._director = self._gm_director
+                gm_addon._entities = self._entity_tracker
+
+            logger.info("GMDirector 直接統合: 初期化完了")
+        except Exception as e:
+            logger.warning("GMDirector 初期化エラー: %s", e)
+
+    def _get_gm_director_addon(self):
+        """GMDirector アドオンのインスタンスを取得する。"""
+        try:
+            return self.addon_manager.get_addon("gm_director")
+        except Exception:
+            return None
+
+    def _get_game_state_from_addons(self):
+        """combat_engine アドオンの GameState を取得。なければ新規作成。"""
+        from core.game_state import GameState
+        try:
+            combat_addon = self.addon_manager.get_addon("combat_engine")
+            if combat_addon and hasattr(combat_addon, '_game_state'):
+                return combat_addon._game_state
+        except Exception:
+            pass
+        return GameState()
+
+    def _fallback_simple_response(self, target_char: dict, enriched: str) -> None:
+        """GMDirector が利用できない場合の素の LLM 応答（フォールバック）。"""
+        prompt_tmpl = self.pm.get_template(target_char.get("prompt_id"))
+        parts = []
+        if self.world_setting.strip():
+            parts.append(self.world_setting.strip())
+        if prompt_tmpl and prompt_tmpl.get("system", "").strip():
+            parts.append(prompt_tmpl["system"].strip())
+        sys_prompt = "\n\n".join(parts)
+
+        res, _ = self._run_async(self.lm_client.generate_response(
+            system_prompt=sys_prompt,
+            user_message=enriched,
+            max_tokens=8192,
+        ))
+        if res:
+            self._post_message(target_char["name"], f"[AI] {res}")
+            self.ctx.add_message(target_char["name"], res, is_ai=True)
+            print(f"   ✓ 応答(fallback): {res[:40]}...")
+
     def _init_knowledge(self) -> None:
         """KnowledgeManager を初期化し、世界観データを取り込む。"""
         try:
@@ -483,16 +803,90 @@ class CCFoliaConnector:
             logger.warning("KnowledgeManager 初期化エラー: %s", e)
             self.knowledge_manager = None
 
+    def _init_addons(self) -> None:
+        """アドオンを探索・ロードし、ルールシステムのフェイズキーワードを適用する。"""
+        try:
+            ctx = AddonContext(
+                adapter=self.adapter,
+                lm_client=self.lm_client,
+                knowledge_manager=self.knowledge_manager,
+                session_manager=self.sm,
+                character_manager=self.cm,
+                root_dir=_ROOT_DIR,
+            )
+            manifests = self.addon_manager.discover()
+            if manifests:
+                self.addon_manager.load_all(ctx)
+                rule = self.addon_manager.get_active_rule_system()
+                if rule:
+                    phase_kw = rule.get_phase_keywords()
+                    if phase_kw:
+                        self.ctx.set_phase_keywords(phase_kw)
+                    logger.info("ルールシステム適用: %s", rule.manifest.name)
+                print(f"✓ {len(self.addon_manager.loaded_addons)} 個のアドオンをロードしました")
+            else:
+                print("ℹ アドオンが見つかりませんでした（デフォルト動作で起動）")
+        except Exception as e:
+            logger.warning("アドオン初期化エラー: %s", e)
+
+    def _get_all_tools(self) -> list[dict]:
+        """コアツール + アドオンツールを集約して返す。"""
+        core_tools = AGENT_TOOLS + MAP_TOOLS + KNOWLEDGE_TOOLS + HEALTH_TOOLS
+        addon_tools = self.addon_manager.get_all_tools()
+        return core_tools + addon_tools
+
     def _close_adapter(self) -> None:
         """VTTアダプターを閉じる。"""
         if self.adapter:
             try:
-                self.adapter.close()
+                self._run_async(self.adapter.close())
             except Exception:
                 pass
             finally:
                 self.adapter = None
                 self.map_ctrl = None
+
+    # ──────────────────────────────────────────
+    # ビルドモード制御
+    # ──────────────────────────────────────────
+
+    def enter_build_mode(self, char_name: str = "GM") -> None:
+        """ビルドモード開始: RP機能を停止し、部屋構築に専念する。"""
+        self._build_status.reset()
+        self._build_status.is_active = True
+        self._health.build_mode = "building"
+        self._post_system_message(
+            char_name, "ビルドモードに入りました。部屋構築中はRP機能を停止します。"
+        )
+        logger.info("ビルドモード開始")
+
+    def exit_build_mode(self, char_name: str = "GM") -> None:
+        """ビルドモード終了: RP機能を再開する。"""
+        summary = self._build_summary()
+        self._build_status.is_active = False
+        self._health.build_mode = "idle"
+        self._post_system_message(char_name, f"ビルドモード終了。{summary}")
+        logger.info("ビルドモード終了: %s", summary)
+
+    def _build_summary(self) -> str:
+        s = self._build_status
+        if s.errors:
+            return f"完了({s.completed_steps}/{s.total_steps}ステップ)、エラー{len(s.errors)}件"
+        return f"全{s.completed_steps}ステップ正常完了"
+
+    def _check_lm_health(self) -> bool:
+        """LMクライアントの到達性を確認する。"""
+        try:
+            res, _ = self._run_async(self.lm_client.generate_response(
+                system_prompt="あなたはGMアシスタントです。",
+                user_message="準備完了を一言で答えてください。",
+                max_tokens=128,
+            ))
+            reachable = bool(res)
+        except Exception:
+            reachable = False
+        self._health.lm_reachable = reachable
+        return reachable
 
     # ──────────────────────────────────────────
     # チャット操作（アダプター委譲）
@@ -502,13 +896,13 @@ class CCFoliaConnector:
         """チャットメッセージを取得する。"""
         if self.adapter is None:
             return []
-        return self.adapter.get_chat_messages()
+        return self._run_async(self.adapter.get_chat_messages())
 
     def _post_message(self, character_name: str, text: str) -> bool:
         """チャットメッセージを送信する。"""
         if self.adapter is None:
             return False
-        return self.adapter.send_chat(character_name, text)
+        return self._run_async(self.adapter.send_chat(character_name, text))
 
     def _post_system_message(self, character_name: str, text: str) -> None:
         """AIプレフィックス付きのシステムメッセージを送信する。"""
@@ -517,6 +911,46 @@ class CCFoliaConnector:
         if ok:
             self._sent_bodies.add(tagged[:80])
             self.ctx.add_message(character_name, tagged, is_ai=True)
+
+    # ──────────────────────────────────────────
+    # 発話者ルーティング
+    # ──────────────────────────────────────────
+
+    _RESPONDER_PATTERNS = (
+        re.compile(r"^\s*【([^】]{1,20})】"),
+        re.compile(r"^\s*「([^」]{1,20})」[：:]"),
+        re.compile(r"^\s*\[([^\]]{1,20})\]"),
+        re.compile(r"^\s*([^\s：:]{1,20})[：:]"),
+    )
+
+    def _resolve_responder(self, line: str) -> dict | None:
+        """ナレーション1行から発話者NPCを推定する。
+
+        行頭の「【名前】」「[名前]」「名前:」等のパターンを検出し、
+        characters.json の NPC (is_ai=True, enabled=True, role in {npc_manager, enemy})
+        と一致すればそのキャラクター辞書を返す。
+        一致しない場合は None（呼び出し側で meta_gm にフォールバック）。
+        """
+        if not line:
+            return None
+        hint: str | None = None
+        for pat in self._RESPONDER_PATTERNS:
+            m = pat.match(line)
+            if m:
+                hint = m.group(1).strip()
+                break
+        if not hint:
+            return None
+
+        for char in self.cm.characters.values():
+            if not char.get("enabled") or not char.get("is_ai"):
+                continue
+            if char.get("role") not in ("npc_manager", "enemy"):
+                continue
+            piece_name = char.get("ccfolia_piece_name") or char.get("name") or ""
+            if piece_name and (piece_name == hint or piece_name in hint or hint in piece_name):
+                return char
+        return None
 
     # ──────────────────────────────────────────
     # ツールディスパッチャー
@@ -564,124 +998,36 @@ class CCFoliaConnector:
                 return False, json.dumps(results, ensure_ascii=False)
             return False, json.dumps({"error": "KnowledgeManager が未初期化です"})
 
-        # アセットアップロードツール
-        if tool_name == "upload_asset" and self.adapter and self._use_browser_use:
-            try:
-                url = self.adapter.upload_asset(
-                    tool_args.get("file_path", ""),
-                    tool_args.get("asset_type", "background"),
-                )
-                return False, json.dumps({"url": url or "", "ok": url is not None})
-            except NotImplementedError:
-                return False, json.dumps({"error": "このアダプターは upload_asset に対応していません"})
+        # ヘルス・ビルドモード制御ツール（コア状態に直接触れるためコアに残す）
+        if tool_name == "get_system_health":
+            return False, json.dumps(self._health.to_dict(), ensure_ascii=False)
 
-        # VLM Vision ツール
-        if tool_name == "analyze_board_vision" and self.adapter and self._use_browser_use:
-            try:
-                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
-                pieces = vision.analyze_board(tool_args.get("query", ""))
-                return False, json.dumps(pieces, ensure_ascii=False, default=str)
-            except (NotImplementedError, AttributeError):
-                return False, json.dumps({"error": "Vision 機能が利用できません"})
+        if tool_name == "enter_build_mode":
+            if self._build_status.is_active:
+                return False, json.dumps({"error": "既にビルドモード中です"})
+            self.enter_build_mode(char_name)
+            return False, json.dumps({"ok": True, "build_mode": "building"})
 
-        if tool_name == "place_piece_at_location" and self.adapter and self._use_browser_use:
-            try:
-                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
-                ok = vision.place_piece_at_visual_location(
-                    tool_args.get("description", ""),
-                    tool_args.get("character_json", {}),
-                )
-                return False, json.dumps({"ok": ok})
-            except (NotImplementedError, AttributeError):
-                return False, json.dumps({"error": "Vision 機能が利用できません"})
+        if tool_name == "exit_build_mode":
+            if not self._build_status.is_active:
+                return False, json.dumps({"error": "ビルドモードではありません"})
+            self.exit_build_mode(char_name)
+            return False, json.dumps({"ok": True, "build_mode": "idle"})
 
-        if tool_name == "describe_board_scene" and self.adapter and self._use_browser_use:
-            try:
-                vision = self.adapter.get_vision_controller()  # type: ignore[union-attr]
-                desc = vision.describe_scene()
-                return False, json.dumps({"description": desc})
-            except (NotImplementedError, AttributeError):
-                return False, json.dumps({"error": "Vision 機能が利用できません"})
-
-        # ルーム構築ツール
-        if tool_name == "build_room" and self.adapter and self._use_browser_use:
-            try:
-                from room_builder import RoomBuilder, RoomDefinition
-                builder = RoomBuilder(adapter=self.adapter)
-                defn = RoomDefinition.from_dict(tool_args.get("room_definition", {}))
-                results = builder.build_room(defn)
-                summary = [
-                    {"step": r.step, "success": r.success, "detail": r.detail, "error": r.error}
-                    for r in results
-                ]
-                return False, json.dumps({"results": summary}, ensure_ascii=False)
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        if tool_name == "set_room_background" and self.adapter and self._use_browser_use:
-            try:
-                from room_builder import RoomBuilder
-                builder = RoomBuilder(adapter=self.adapter)
-                r = builder.set_background(tool_args.get("image_path", ""))
-                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        if tool_name == "add_room_bgm" and self.adapter and self._use_browser_use:
-            try:
-                from room_builder import RoomBuilder
-                builder = RoomBuilder(adapter=self.adapter)
-                r = builder.add_bgm(
-                    tool_args.get("file_path", ""), tool_args.get("name", ""),
-                )
-                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        if tool_name == "place_room_character" and self.adapter and self._use_browser_use:
-            try:
-                from room_builder import CharacterPlacement, RoomBuilder
-                builder = RoomBuilder(adapter=self.adapter)
-                char = CharacterPlacement(
-                    name=tool_args.get("name", ""),
-                    position=tool_args.get("position", ""),
-                    grid_x=tool_args.get("grid_x"),
-                    grid_y=tool_args.get("grid_y"),
-                    ccfolia_data=tool_args.get("ccfolia_data", {}),
-                )
-                r = builder.place_character(char)
-                return False, json.dumps({"ok": r.success, "detail": r.detail, "error": r.error})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        # コパイロットツール
-        if tool_name == "transition_scene" and self._copilot:
-            results = self._copilot.transition_to(tool_args.get("scene_name", ""))
-            return False, json.dumps({"results": results}, ensure_ascii=False)
-
-        if tool_name == "list_scenes" and self._copilot:
-            scenes = self._copilot.list_scenes()
-            return False, json.dumps({"scenes": scenes}, ensure_ascii=False)
-
-        if tool_name == "register_scene" and self._copilot:
-            try:
-                from session_copilot import SceneDefinition
-                defn = SceneDefinition.from_dict(tool_args.get("scene_definition", {}))
-                self._copilot.register_scene(defn)
-                return False, json.dumps({"ok": True, "scene": defn.name})
-            except Exception as e:
-                return False, json.dumps({"error": str(e)})
-
-        if tool_name == "set_copilot_mode" and self._copilot:
-            self._copilot.mode = tool_args.get("mode", "auto")
-            return False, json.dumps({"ok": True, "mode": self._copilot.mode})
-
-        # マップ操作ツール
+        # マップ操作ツール（コアに残す）
         if self.map_ctrl:
             result = execute_map_tool(self.map_ctrl, tool_name, tool_args)
-            return False, json.dumps(result, ensure_ascii=False, default=str)
+            if "error" not in result or "未知のツール" not in result.get("error", ""):
+                return False, json.dumps(result, ensure_ascii=False, default=str)
 
-        return False, json.dumps({"error": f"未知のツール: {tool_name}"})
+        # アドオンに委譲
+        addon_ctx = ToolExecutionContext(
+            char_name=char_name,
+            tool_call_id=tool_call_id,
+            adapter=self.adapter,
+            connector=self,
+        )
+        return self.addon_manager.execute_tool(tool_name, tool_args, addon_ctx)
 
     # ──────────────────────────────────────────
     # エージェントループ
@@ -696,8 +1042,20 @@ class CCFoliaConnector:
         char_name = target_char["name"]
         prompt_tmpl = self.pm.get_template(target_char.get("prompt_id"))
 
-        sys_prompt = (
-            f"{self.world_setting}\n\n{prompt_tmpl['system'] if prompt_tmpl else ''}\n\n"
+        # ルールアドオンから世界観・プロンプトを動的取得
+        rule_addon = self.addon_manager.get_active_rule_system()
+        if rule_addon:
+            world = rule_addon.get_world_setting() or self.world_setting
+            rule_override = rule_addon.get_system_prompt_override() or ""
+        else:
+            world = self.world_setting
+            rule_override = ""
+
+        base_system = prompt_tmpl["system"] if prompt_tmpl else ""
+        parts = [world, base_system]
+        if rule_override:
+            parts.append(rule_override)
+        parts.append(
             "【GMアクション指示】\n"
             "あなたはGMです。画像とチャットを見て次に行うべきことを判断してください。\n"
             "1. まず `[思考]` と `[/思考]` のタグの中で、状況を分析してください。\n"
@@ -709,6 +1067,7 @@ class CCFoliaConnector:
             "ダメージや回復など、ステータスに変動があった際は、発言の末尾に必ず"
             "「(現在HP: 敵A 5/10, 敵B 10/10)」のように明記してステータス管理を行ってください。"
         )
+        sys_prompt = "\n\n".join(p for p in parts if p)
 
         messages: list[dict] = [
             {"role": "system", "content": sys_prompt},
@@ -722,19 +1081,19 @@ class CCFoliaConnector:
                 screenshot_b64: str | None = None
                 if self.adapter:
                     try:
-                        raw = self.adapter.take_screenshot()
+                        raw = self._run_async(self.adapter.take_screenshot())
                         if raw:
                             screenshot_b64 = base64.b64encode(raw).decode("ascii")
                     except Exception:
                         pass
 
-                content, tool_calls = self.lm_client.generate_with_tools(
+                content, tool_calls = self._run_async(self.lm_client.generate_with_tools(
                     messages,
-                    ALL_TOOLS,
+                    self._get_all_tools(),
                     temperature=0.7,
                     max_tokens=1500,
                     image_base64=screenshot_b64,
-                )
+                ))
 
                 if content is None and tool_calls is None:
                     print("   ⚠️ APIからの応答がありませんでした。ループを中断します。")
@@ -878,6 +1237,11 @@ class CCFoliaConnector:
                     self.ctx.add_message(speaker, body)
                     print(f"\n📨 新着: [{speaker}] {body[:40]}")
 
+                    # ビルドモード中はRP処理をスキップ
+                    if self._build_status.is_active:
+                        print(f"   [ビルドモード] RP処理スキップ: {body[:30]}")
+                        continue
+
                     # コパイロットのイベントルール処理
                     if self._copilot:
                         try:
@@ -892,6 +1256,22 @@ class CCFoliaConnector:
                     trigger_kw = any(k in body for k in keywords) if keywords else False
                     print(f"   DEBUG: トリガー判定: '＞'={trigger_gt}, キーワード={trigger_kw}")
 
+                    # NPCキーワード一致 → 直接NPC応答（meta_gm を除く）
+                    matched_ids = self.detector.detect(body)
+                    npc_ids = [cid for cid in matched_ids if cid != "meta_gm"]
+                    if npc_ids:
+                        for npc_id in npc_ids:
+                            npc_char = self.cm.get_character(npc_id)
+                            if not npc_char:
+                                continue
+                            enriched_npc = (
+                                f"{self.ctx.get_context_summary()}\n\n"
+                                f"【今回反応すべき発言】\n[{speaker}]: {body}"
+                            )
+                            print(f"   🎭 NPC直接応答: {npc_char.get('name')} (id={npc_id})")
+                            self._run_agent_loop(npc_char, npc_id, enriched_npc)
+                        # NPC応答後も GM トリガー判定は続行（両立）
+
                     if trigger_gt or trigger_kw:
                         target_char = self.cm.get_character("meta_gm")
                         enriched = (
@@ -901,28 +1281,40 @@ class CCFoliaConnector:
 
                         if self.ctx.phase in ["combat", "mission"]:
                             self._run_agent_loop(target_char, "meta_gm", enriched)
+                        elif self._gm_director is not None:
+                            # Phase 5: GMDirector で全フェーズ統合処理
+                            try:
+                                result = self._run_async(
+                                    self._gm_director.process_turn(
+                                        player_message=body,
+                                        character_name=speaker,
+                                        extra_context=f"【フェイズ: {self.ctx.phase.upper()}】",
+                                    )
+                                )
+                                for line in result.vtt_chat_lines:
+                                    responder = self._resolve_responder(line) or target_char
+                                    self._post_system_message(responder["name"], line)
+                                    print(f"   ✓ GMDirector応答 [{responder['name']}]: {line[:40]}...")
+
+                                if self._entity_tracker and self._entity_path:
+                                    try:
+                                        self._entity_tracker.save(self._entity_path)
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                logger.error("GMDirector 処理エラー (fallback): %s", e)
+                                self._fallback_simple_response(target_char, enriched)
                         else:
-                            prompt_tmpl = self.pm.get_template(target_char.get("prompt_id"))
-                            sys_prompt = (
-                                f"{self.world_setting}\n\n"
-                                f"{prompt_tmpl.get('system', '') if prompt_tmpl else ''}\n"
-                                "※重要: 内部の思考プロセス（Thinking Process）は極力短く済ませ、"
-                                "プレイヤーへの返答テキストを直ちに出力してください。"
-                            )
-
-                            res, _ = self.lm_client.generate_response(
-                                system_prompt=sys_prompt,
-                                user_message=enriched,
-                                max_tokens=4096,
-                            )
-
-                            if res:
-                                self._post_message(target_char["name"], f"[AI] {res}")
-                                self.ctx.add_message(target_char["name"], res, is_ai=True)
-                                print(f"   ✓ 応答: {res[:40]}...")
+                            self._fallback_simple_response(target_char, enriched)
 
             self._known_messages = self._known_messages[-300:]
             self._drain_stdin_queue()
+
+            # 定期ヘルスチェック（60ポーリング≒約2分ごと）
+            if poll_count % 60 == 0:
+                self._check_lm_health()
+                print(f"   [ヘルス] {self._health.to_display()}")
+
             time.sleep(self.poll_interval)
 
     def _stdin_monitor_loop(self) -> None:
@@ -982,6 +1374,10 @@ class CCFoliaConnector:
         self._init_adapter()
         self._init_knowledge()
         self._init_copilot()
+        self._init_addons()
+        self._init_gm_director()
+        self._check_lm_health()
+        print(f"   [ヘルス] {self._health.to_display()}")
         self._running = True
 
         # stdin監視だけ別スレッド（Playwright を触らない）
@@ -1002,9 +1398,33 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--room", required=True)
     parser.add_argument("--default", default="meta_gm")
+    parser.add_argument(
+        "--mode", choices=["persistent", "fresh", "cdp"], default="persistent",
+        help="ブラウザ接続モード: persistent=永続プロファイル(既定,CDP不要), "
+             "fresh=新規Chromium起動, cdp=既存ブラウザにCDP接続",
+    )
+    parser.add_argument(
+        "--cdp", default=None,
+        help="CDP URL で既存ブラウザに接続 (例: http://localhost:9222)。指定時は --mode cdp 相当",
+    )
+    parser.add_argument(
+        "--profile-dir", default=None,
+        help="persistent モード時のプロファイル保存先（未指定時は ~/.tactical_ai/ccfolia_profile）",
+    )
+    parser.add_argument(
+        "--channel", default=None,
+        help="ブラウザチャンネル (chrome / msedge など)。persistent モードで実インストール版Chromeを使う場合に指定",
+    )
     args = parser.parse_args()
     try:
-        CCFoliaConnector(args.room, args.default).start()
+        CCFoliaConnector(
+            args.room,
+            args.default,
+            cdp_url=args.cdp,
+            browser_mode=args.mode,
+            profile_dir=args.profile_dir,
+            browser_channel=args.channel,
+        ).start()
     except Exception:
         print("\n" + "=" * 50)
         print("❌ 致命的エラーが発生しました:")

@@ -7,7 +7,8 @@ Browser Use が CCFolia に対して基本的な DOM 操作を
     python scripts/phase1_validation.py --room-url https://ccfolia.com/rooms/xxxx
 
 前提条件:
-    - configs/.env に OPENAI_API_KEY または ANTHROPIC_API_KEY を設定済み
+    - LM Studio 等のローカル LLM サーバーが起動中（デフォルト: localhost:1234）
+      または configs/.env に OPENAI_API_KEY / ANTHROPIC_API_KEY を設定済み
     - pip install 'tactical-exorcist-trpg-ai[browser-use]' を実行済み
 """
 
@@ -50,14 +51,25 @@ def main() -> None:
     from core.config import load_config
 
     cfg = load_config()
-    api_key = cfg["openai_api_key"] or cfg["anthropic_api_key"]
-    if not api_key:
-        print("❌ configs/.env に OPENAI_API_KEY または ANTHROPIC_API_KEY を設定してください")
+    provider = cfg.get("browser_use_provider", "local")
+    api_key = ""
+    if provider == "anthropic":
+        api_key = cfg["anthropic_api_key"]
+    elif provider == "openai":
+        api_key = cfg["openai_api_key"]
+
+    # クラウドプロバイダー選択時にAPIキーが無い場合のみエラー
+    if provider in ("openai", "anthropic") and not api_key:
+        print(f"❌ provider={provider} ですが API キーが設定されていません")
+        print("   手順:")
+        print("   1. configs/.env をテキストエディタで開く")
+        print("   2. 対応する API キーを設定")
+        print("   3. または BROWSER_USE_PROVIDER=local に変更してローカル LLM を使用")
         sys.exit(1)
 
-    provider = "anthropic" if cfg["anthropic_api_key"] and not cfg["openai_api_key"] else "openai"
     model = cfg["browser_use_model"]
-    print(f"📋 設定: model={model}, provider={provider}")
+    lm_studio_url = cfg.get("lm_studio_url", "http://localhost:1234")
+    print(f"📋 設定: provider={provider}, model={model or '(自動)'}, lm_studio_url={lm_studio_url}")
 
     from core.browser_use_agent import BrowserUseAgentWrapper
 
@@ -66,6 +78,7 @@ def main() -> None:
         api_key=api_key,
         provider=provider,
         headless=args.headless,
+        lm_studio_url=lm_studio_url,
     )
 
     results = []

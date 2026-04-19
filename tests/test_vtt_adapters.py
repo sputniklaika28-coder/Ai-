@@ -5,7 +5,7 @@ BaseVTTAdapter のインターフェース準拠と、
 CCFoliaAdapter の各メソッドをモック環境でテストする。
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -28,7 +28,7 @@ class TestBaseVTTAdapterInterface:
         """必要なメソッドが1つでも欠けているとインスタンス化できない"""
 
         class IncompleteAdapter(BaseVTTAdapter):
-            def connect(self, room_url, headless=False):
+            async def connect(self, room_url, headless=False, cdp_url=None):
                 pass
 
         with pytest.raises(TypeError):
@@ -38,14 +38,14 @@ class TestBaseVTTAdapterInterface:
         """全メソッドを実装したサブクラスはインスタンス化できる"""
 
         class CompleteAdapter(BaseVTTAdapter):
-            def connect(self, room_url, headless=False): pass
-            def close(self): pass
-            def get_board_state(self): return []
-            def move_piece(self, piece_id, grid_x, grid_y): return True
-            def spawn_piece(self, character_json): return True
-            def send_chat(self, character_name, text): return True
-            def get_chat_messages(self): return []
-            def take_screenshot(self): return None
+            async def connect(self, room_url, headless=False, cdp_url=None): pass
+            async def close(self): pass
+            async def get_board_state(self): return []
+            async def move_piece(self, piece_id, grid_x, grid_y): return True
+            async def spawn_piece(self, character_json): return True
+            async def send_chat(self, character_name, text): return True
+            async def get_chat_messages(self): return []
+            async def take_screenshot(self): return None
 
         adapter = CompleteAdapter()
         assert isinstance(adapter, BaseVTTAdapter)
@@ -98,8 +98,8 @@ class TestCCFoliaAdapterExtractHash:
 
 @pytest.fixture
 def mock_page():
-    """Playwright Page オブジェクトのモック"""
-    page = MagicMock()
+    """Playwright Page オブジェクトのモック（AsyncMock）"""
+    page = AsyncMock()
     page.evaluate.return_value = [
         {
             "index": 0,
@@ -123,34 +123,34 @@ def adapter_with_mock_page(mock_page) -> CCFoliaAdapter:
 
 
 class TestCCFoliaAdapterGetBoardState:
-    def test_returns_list_of_pieces(self, adapter_with_mock_page):
-        state = adapter_with_mock_page.get_board_state()
+    async def test_returns_list_of_pieces(self, adapter_with_mock_page):
+        state = await adapter_with_mock_page.get_board_state()
         assert isinstance(state, list)
         assert len(state) == 1
 
-    def test_piece_has_required_keys(self, adapter_with_mock_page):
-        state = adapter_with_mock_page.get_board_state()
+    async def test_piece_has_required_keys(self, adapter_with_mock_page):
+        state = await adapter_with_mock_page.get_board_state()
         piece = state[0]
         for key in ("index", "img_hash", "img_url", "px_x", "px_y", "grid_x", "grid_y"):
             assert key in piece
 
-    def test_grid_calculated_from_px(self, adapter_with_mock_page):
-        state = adapter_with_mock_page.get_board_state()
+    async def test_grid_calculated_from_px(self, adapter_with_mock_page):
+        state = await adapter_with_mock_page.get_board_state()
         piece = state[0]
         assert piece["grid_x"] == 1  # 96 / 96
         assert piece["grid_y"] == 2  # 192 / 96
 
-    def test_hash_extracted(self, adapter_with_mock_page):
-        state = adapter_with_mock_page.get_board_state()
+    async def test_hash_extracted(self, adapter_with_mock_page):
+        state = await adapter_with_mock_page.get_board_state()
         assert state[0]["img_hash"] == "abcdef12"
 
-    def test_empty_board(self, adapter_with_mock_page, mock_page):
+    async def test_empty_board(self, adapter_with_mock_page, mock_page):
         mock_page.evaluate.return_value = []
-        assert adapter_with_mock_page.get_board_state() == []
+        assert await adapter_with_mock_page.get_board_state() == []
 
 
 class TestCCFoliaAdapterMovePiece:
-    def test_calls_evaluate_with_deltas(self, adapter_with_mock_page, mock_page):
+    async def test_calls_evaluate_with_deltas(self, adapter_with_mock_page, mock_page):
         # First evaluate call returns board state, second moves piece
         mock_page.evaluate.side_effect = [
             [
@@ -164,20 +164,20 @@ class TestCCFoliaAdapterMovePiece:
             ],
             True,  # move result
         ]
-        result = adapter_with_mock_page.move_piece("abcdef12", 5, 7)
+        result = await adapter_with_mock_page.move_piece("abcdef12", 5, 7)
         assert result is True
         assert mock_page.evaluate.call_count == 2
 
-    def test_returns_false_when_piece_not_found(self, adapter_with_mock_page, mock_page):
+    async def test_returns_false_when_piece_not_found(self, adapter_with_mock_page, mock_page):
         mock_page.evaluate.return_value = []
-        result = adapter_with_mock_page.move_piece("nonexistent", 3, 4)
+        result = await adapter_with_mock_page.move_piece("nonexistent", 3, 4)
         assert result is False
 
 
 class TestCCFoliaAdapterSpawnPiece:
-    def test_writes_clipboard_and_pastes(self, adapter_with_mock_page, mock_page):
-        mock_page.query_selector.return_value = MagicMock()
-        result = adapter_with_mock_page.spawn_piece({"name": "テスト", "hp": 10})
+    async def test_writes_clipboard_and_pastes(self, adapter_with_mock_page, mock_page):
+        mock_page.query_selector.return_value = AsyncMock()
+        result = await adapter_with_mock_page.spawn_piece({"name": "テスト", "hp": 10})
         assert result is True
         # clipboard write と Ctrl+V が呼ばれたか確認
         mock_page.evaluate.assert_called()
@@ -185,13 +185,13 @@ class TestCCFoliaAdapterSpawnPiece:
 
 
 class TestCCFoliaAdapterTakeScreenshot:
-    def test_returns_bytes(self, adapter_with_mock_page):
-        screenshot = adapter_with_mock_page.take_screenshot()
+    async def test_returns_bytes(self, adapter_with_mock_page):
+        screenshot = await adapter_with_mock_page.take_screenshot()
         assert isinstance(screenshot, bytes)
 
-    def test_returns_none_on_error(self, adapter_with_mock_page, mock_page):
+    async def test_returns_none_on_error(self, adapter_with_mock_page, mock_page):
         mock_page.screenshot.side_effect = Exception("error")
-        assert adapter_with_mock_page.take_screenshot() is None
+        assert await adapter_with_mock_page.take_screenshot() is None
 
 
 class TestCCFoliaAdapterPageProperty:
@@ -202,11 +202,119 @@ class TestCCFoliaAdapterPageProperty:
 
 
 class TestCCFoliaAdapterClose:
-    def test_close_without_connect(self):
+    async def test_close_without_connect(self):
         adapter = CCFoliaAdapter()
-        adapter.close()  # should not raise
+        await adapter.close()  # should not raise
 
-    def test_close_resets_state(self, adapter_with_mock_page):
-        adapter_with_mock_page.close()
+    async def test_close_resets_state(self, adapter_with_mock_page):
+        await adapter_with_mock_page.close()
         assert adapter_with_mock_page._page is None
         assert adapter_with_mock_page._browser is None
+
+
+# ──────────────────────────────────────────
+# CDP接続テスト
+# ──────────────────────────────────────────
+
+
+class TestCCFoliaAdapterCDP:
+    async def test_connect_with_cdp_url_calls_connect_cdp(self):
+        """connect(cdp_url=...) で connect_cdp が呼ばれること。"""
+        adapter = CCFoliaAdapter()
+        adapter.connect_cdp = AsyncMock()
+        await adapter.connect("https://ccfolia.com/rooms/test", cdp_url="http://localhost:9222")
+        adapter.connect_cdp.assert_called_once_with("http://localhost:9222")
+
+    def test_connect_without_cdp_url_does_not_call_connect_cdp(self, mock_page):
+        """cdp_url 未指定時は connect_cdp が呼ばれないこと。"""
+        adapter = CCFoliaAdapter()
+        adapter.connect_cdp = AsyncMock()
+        assert not adapter.connect_cdp.called
+
+    async def test_connect_cdp_no_contexts_raises(self):
+        """CDP接続でコンテキストがない場合はRuntimeError。"""
+        adapter = CCFoliaAdapter()
+        mock_pw_manager = AsyncMock()
+        mock_browser = MagicMock()
+        mock_browser.contexts = []
+        mock_pw_manager.chromium.connect_over_cdp = AsyncMock(return_value=mock_browser)
+
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.start = AsyncMock(return_value=mock_pw_manager)
+
+        with (
+            patch("core.vtt_adapters.ccfolia_adapter._HAS_PLAYWRIGHT", True),
+            patch("core.vtt_adapters.ccfolia_adapter.async_playwright",
+                  return_value=mock_pw_instance),
+        ):
+            with pytest.raises(RuntimeError, match="コンテキスト"):
+                await adapter.connect_cdp("http://localhost:9222")
+
+    async def test_connect_cdp_no_ccfolia_tab_raises(self):
+        """CDP接続でCCFoliaタブがない場合はRuntimeError。"""
+        adapter = CCFoliaAdapter()
+        mock_pw_manager = AsyncMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        plain_page = MagicMock()
+        plain_page.url = "https://google.com"
+        mock_context.pages = [plain_page]
+        mock_browser.contexts = [mock_context]
+        mock_pw_manager.chromium.connect_over_cdp = AsyncMock(return_value=mock_browser)
+
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.start = AsyncMock(return_value=mock_pw_manager)
+
+        with (
+            patch("core.vtt_adapters.ccfolia_adapter._HAS_PLAYWRIGHT", True),
+            patch("core.vtt_adapters.ccfolia_adapter.async_playwright",
+                  return_value=mock_pw_instance),
+        ):
+            with pytest.raises(RuntimeError, match="CCFolia"):
+                await adapter.connect_cdp("http://localhost:9222")
+
+    async def test_connect_cdp_finds_ccfolia_tab(self):
+        """CDP接続でCCFoliaタブが見つかった場合はページが設定される。"""
+        adapter = CCFoliaAdapter()
+        mock_pw_manager = AsyncMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_page1 = MagicMock()
+        mock_page1.url = "https://google.com"
+        mock_page2 = MagicMock()
+        mock_page2.url = "https://ccfolia.com/rooms/abc123"
+        mock_context.pages = [mock_page1, mock_page2]
+        mock_browser.contexts = [mock_context]
+        mock_pw_manager.chromium.connect_over_cdp = AsyncMock(return_value=mock_browser)
+
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.start = AsyncMock(return_value=mock_pw_manager)
+
+        with (
+            patch("core.vtt_adapters.ccfolia_adapter._HAS_PLAYWRIGHT", True),
+            patch("core.vtt_adapters.ccfolia_adapter.async_playwright",
+                  return_value=mock_pw_instance),
+        ):
+            await adapter.connect_cdp("http://localhost:9222")
+
+        assert adapter._page is mock_page2
+        assert adapter._context is mock_context
+
+
+class TestBaseAdapterCDPSignature:
+    async def test_connect_accepts_cdp_url(self):
+        """BaseVTTAdapter.connect() が cdp_url パラメータを受け付けること。"""
+
+        class TestAdapter(BaseVTTAdapter):
+            async def connect(self, room_url, headless=False, cdp_url=None): pass
+            async def close(self): pass
+            async def get_board_state(self): return []
+            async def move_piece(self, piece_id, grid_x, grid_y): return True
+            async def spawn_piece(self, character_json): return True
+            async def send_chat(self, character_name, text): return True
+            async def get_chat_messages(self): return []
+            async def take_screenshot(self): return None
+
+        adapter = TestAdapter()
+        await adapter.connect("https://example.com", cdp_url="http://localhost:9222")
+        assert isinstance(adapter, BaseVTTAdapter)

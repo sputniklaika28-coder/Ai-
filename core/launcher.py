@@ -16,6 +16,8 @@ from tkinter import messagebox, scrolledtext, ttk
 
 import requests
 
+from addon_management_tab import AddonManagementTab, AddonStateManager
+
 # --- パス設定 ---
 _THIS = Path(__file__).resolve()
 if _THIS.parent.name == "core":
@@ -166,6 +168,28 @@ class LauncherTab(ttk.Frame):
             row=3, column=1, sticky="w", padx=8
         )
 
+        # CDP接続オプション（既存ブラウザに接続してGM権限を引き継ぐ）
+        cdp_frame = ttk.Frame(top)
+        cdp_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=4)
+        self.var_use_cdp = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            cdp_frame, text="既存ブラウザに接続 (CDP)",
+            variable=self.var_use_cdp,
+            command=self._toggle_cdp,
+        ).pack(side=tk.LEFT)
+        self.var_cdp_url = tk.StringVar(value="http://localhost:9222")
+        self.entry_cdp_url = ttk.Entry(
+            cdp_frame, textvariable=self.var_cdp_url, width=30, state="disabled"
+        )
+        self.entry_cdp_url.pack(side=tk.LEFT, padx=(8, 0))
+        self.lbl_cdp_hint = ttk.Label(
+            cdp_frame,
+            text="Chrome を --remote-debugging-port=9222 で起動",
+            foreground="gray",
+            font=("", 8),
+        )
+        self.lbl_cdp_hint.pack(side=tk.LEFT, padx=(8, 0))
+
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, pady=(0, 8))
 
@@ -229,14 +253,23 @@ class LauncherTab(ttk.Frame):
             self.lm_status_var.set("✗ 未接続 — LM-Studio を起動してください")
             self.lm_status_label.config(foreground="red")
 
+    def _toggle_cdp(self):
+        """CDPチェックボックスの切り替え時にURL入力欄の有効/無効を切り替える。"""
+        if self.var_use_cdp.get():
+            self.entry_cdp_url.config(state="normal")
+        else:
+            self.entry_cdp_url.config(state="disabled")
+
     def _on_start(self):
         url = self.var_url.get().strip()
-        if not url:
+        use_cdp = self.var_use_cdp.get()
+
+        if not url and not use_cdp:
             messagebox.showwarning(
                 "入力エラー", "Room URL を入力してください", parent=self.winfo_toplevel()
             )
             return
-        if not url.startswith("http"):
+        if url and not url.startswith("http"):
             messagebox.showwarning(
                 "入力エラー",
                 "URL は http:// または https:// で始める必要があります",
@@ -244,10 +277,18 @@ class LauncherTab(ttk.Frame):
             )
             return
 
+        # CDP接続時はroom_urlが空でもCCFoliaタブから自動取得するため許容
+        if use_cdp and not url:
+            url = "https://ccfolia.com"  # プレースホルダー（CDP接続時は使わない）
+
         default_char = self.var_default_char.get().strip() or "meta_gm"
         connector_path = CORE_DIR / "ccfolia_connector.py"
 
         cmd = [PYTHON, str(connector_path), "--room", url, "--default", default_char]
+        if use_cdp:
+            cdp_url = self.var_cdp_url.get().strip()
+            if cdp_url:
+                cmd += ["--cdp", cdp_url]
 
         self._log(f"起動コマンド: {' '.join(cmd)}\n", "info")
 
@@ -1654,18 +1695,20 @@ class EnvSettingsTab(ttk.Frame):
 
     # 設定項目の定義: (envキー, ラベル, デフォルト値, 説明, 入力タイプ)
     _FIELDS = [
-        ("OPENAI_API_KEY", "OpenAI API Key", "sk-...", "Browser Use + VLM に必要", "password"),
-        ("ANTHROPIC_API_KEY", "Anthropic API Key", "", "Claude 利用時（任意）", "password"),
-        ("BROWSER_USE_MODEL", "Browser Use モデル", "gpt-4o", "Browser Use の推論モデル", "combo"),
+        ("BROWSER_USE_PROVIDER", "Browser Use プロバイダー", "local", "Browser Use の推論エンジン", "combo"),
+        ("BROWSER_USE_MODEL", "Browser Use モデル", "", "モデル名（空欄=自動選択）", "combo"),
         ("LM_STUDIO_URL", "LM Studio URL", "http://localhost:1234", "ローカル LLM サーバー", "entry"),
-        ("VLM_PROVIDER", "VLM プロバイダー", "openai", "Canvas 解析用 VLM", "combo"),
-        ("VLM_MODEL", "VLM モデル", "gpt-4o", "VLM のモデル名", "combo"),
+        ("VLM_PROVIDER", "VLM プロバイダー", "local", "Canvas 解析用 VLM", "combo"),
+        ("VLM_MODEL", "VLM モデル", "", "VLM モデル名（空欄=自動選択）", "combo"),
+        ("OPENAI_API_KEY", "OpenAI API Key", "", "クラウド利用時（任意）", "password"),
+        ("ANTHROPIC_API_KEY", "Anthropic API Key", "", "クラウド利用時（任意）", "password"),
     ]
 
     _COMBO_OPTIONS = {
-        "BROWSER_USE_MODEL": ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514"],
-        "VLM_PROVIDER": ["openai", "local"],
-        "VLM_MODEL": ["gpt-4o", "gpt-4o-mini"],
+        "BROWSER_USE_PROVIDER": ["local", "openai", "anthropic"],
+        "BROWSER_USE_MODEL": ["", "gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514"],
+        "VLM_PROVIDER": ["local", "openai"],
+        "VLM_MODEL": ["", "gpt-4o", "gpt-4o-mini"],
     }
 
     def __init__(self, parent):
@@ -1974,7 +2017,21 @@ class TacticalAILauncher(tk.Tk):
         style = ttk.Style(self)
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        style.configure("TNotebook.Tab", font=("", 11), padding=(12, 6))
+
+        # RimWorld風 ダークテーマ設定
+        BG_MAIN = "#1a1a2e"
+        FG_MAIN = "#e0e0e0"
+
+        style.configure(".", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TFrame", background=BG_MAIN)
+        style.configure("TLabel", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TButton", background="#16213e", foreground=FG_MAIN)
+        style.configure("TLabelframe", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TLabelframe.Label", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TCheckbutton", background=BG_MAIN, foreground=FG_MAIN)
+        style.configure("TNotebook", background=BG_MAIN, borderwidth=0)
+        style.configure("TNotebook.Tab", background="#16213e", foreground=FG_MAIN, padding=(12, 6))
+        style.map("TNotebook.Tab", background=[("selected", "#1e2a3a")], foreground=[("selected", "#ffffff")])
 
     def _build_menu(self):
         menubar = tk.Menu(self)
@@ -2004,8 +2061,9 @@ class TacticalAILauncher(tk.Tk):
         self.tab_history = HistoryTab(self.notebook)
         self.tab_world = WorldSettingTab(self.notebook)
         self.tab_generator = GeneratorTab(self.notebook)
-        self.tab_env = EnvSettingsTab(self.notebook)
-        self.tab_deps = DependencyTab(self.notebook)
+
+        # 新設: アドオン管理タブ
+        self.tab_addon_mgr = AddonManagementTab(self.notebook)
 
         self.notebook.add(self.tab_launch, text=" ▶ CCFolia起動 ")
         self.notebook.add(self.tab_maker, text=" 🎲 キャラクターメーカー ")
@@ -2015,30 +2073,79 @@ class TacticalAILauncher(tk.Tk):
         self.notebook.add(self.tab_history, text=" 🕒 履歴 ")
         self.notebook.add(self.tab_world, text=" 🌍 世界観 ")
         self.notebook.add(self.tab_generator, text=" 🛠️ 汎用ジェネレーター ")
-        self.notebook.add(self.tab_env, text=" 🔧 環境設定 ")
-        self.notebook.add(self.tab_deps, text=" 📦 依存関係 ")
+
+        # アドオン管理タブの追加
+        self.notebook.add(self.tab_addon_mgr, text=" 🧩 アドオン管理 ")
+
+        # アドオンGUIタブを動的に追加
+        self._load_addon_tabs()
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
+
+    def _load_addon_tabs(self):
+        """addon_state.jsonを読み込み、有効なアドオンのGUIタブのみ動的追加する"""
+        try:
+            from pathlib import Path
+            addons_dir = Path(__file__).resolve().parent.parent / "addons"
+            if not addons_dir.is_dir():
+                return
+
+            import sys
+            root_dir = str(addons_dir.parent)
+            if root_dir not in sys.path:
+                sys.path.insert(0, root_dir)
+
+            from core.addons import AddonManager
+            # 状態管理ファイルから有効なアドオンIDを取得
+            state_mgr = AddonStateManager(CONFIGS_DIR / "addon_state.json")
+            enabled_ids = state_mgr.state.get("enabled", [])
+
+            mgr = AddonManager(addons_dir=addons_dir)
+            manifests = mgr.discover()
+
+            for manifest in manifests:
+                # 有効なアドオンかつGUIタブを持つ場合のみ処理
+                if manifest.id in enabled_ids and manifest.gui_tab and manifest.gui_tab_label:
+                    try:
+                        import importlib.util
+                        addon_dir = addons_dir / manifest.id
+                        entry_path = addon_dir / manifest.entry_point
+                        spec = importlib.util.spec_from_file_location(
+                            f"addons.{manifest.id}", entry_path
+                        )
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            tab_cls = getattr(mod, manifest.gui_tab, None)
+                            if tab_cls:
+                                tab = tab_cls(self.notebook)
+                                self.notebook.add(tab, text=f" {manifest.gui_tab_label} ")
+                    except Exception as e:
+                        print(f"アドオンタブ読み込みエラー ({manifest.id}): {e}")
+        except Exception as e:
+            print(f"アドオンタブスキャンエラー: {e}")
 
     def _on_tab_change(self, event):
         try:
             idx = event.widget.index(event.widget.select())
-            if idx == 0:
+            # 固定タブはテキストで照合（アドオンタブ追加後もインデックスがずれない）
+            tab_text = event.widget.tab(idx, "text").strip()
+            if idx == 0 or tab_text.startswith("▶"):
                 self.tab_launch._refresh_sessions()
                 self.tab_launch._update_lm_status()
-            elif idx == 2:
+            elif tab_text.startswith("👥"):
                 self.tab_char.refresh()
-            elif idx == 3:
+            elif tab_text.startswith("📝"):
                 self.tab_prompt.refresh()
-            elif idx == 4:
+            elif tab_text.startswith("⚙"):
                 self.tab_session._load_session()
-            elif idx == 5:
+            elif tab_text.startswith("🕒"):
                 self.tab_history.refresh()
-            elif idx == 6:
+            elif tab_text.startswith("🌍"):
                 self.tab_world.load()
-            elif idx == 8:
+            elif tab_text.startswith("🔧"):
                 self.tab_env._load_env()
-            elif idx == 9:
+            elif tab_text.startswith("📦"):
                 self.tab_deps._check_deps()
         except Exception:
             pass

@@ -10,13 +10,18 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import re
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 try:
+    from core.vision_utils import (
+        extract_json,
+        is_in_viewport,
+        parse_coordinates,
+        parse_single_coordinate,
+    )
     from core.vtt_adapters.playwright_utils import (
         GRID_SIZE,
         clip_screenshot,
@@ -25,6 +30,12 @@ try:
         spawn_piece_clipboard,
     )
 except ModuleNotFoundError:
+    from vision_utils import (  # type: ignore[no-redef]
+        extract_json,
+        is_in_viewport,
+        parse_coordinates,
+        parse_single_coordinate,
+    )
     from vtt_adapters.playwright_utils import (  # type: ignore[no-redef]
         GRID_SIZE,
         clip_screenshot,
@@ -252,12 +263,29 @@ class VisionCanvasController:
     # VLM バックエンド
     # ──────────────────────────────────────────
 
+    def _ensure_local_vlm(self) -> None:
+        """ローカル VLM クライアントが未設定なら自動生成する。"""
+        if self._lm_client is not None:
+            return
+        try:
+            try:
+                from core.lm_client import LMClient
+            except ModuleNotFoundError:
+                from lm_client import LMClient  # type: ignore[no-redef]
+            self._lm_client = LMClient()
+        except Exception as e:
+            logger.warning("ローカル VLM クライアントの初期化に失敗: %s", e)
+
     def _call_vlm(self, prompt: str, image_b64: str) -> str:
         """設定に応じた VLM バックエンドを呼び出す。"""
-        if self._vlm_provider == "local" and self._lm_client is not None:
-            return self._call_local_vlm(prompt, image_b64)
+        if self._vlm_provider == "local":
+            self._ensure_local_vlm()
+            if self._lm_client is not None:
+                return self._call_local_vlm(prompt, image_b64)
         if self._cloud_api_key:
             return self._call_cloud_vlm(prompt, image_b64)
+        # フォールバック: ローカル VLM を試行
+        self._ensure_local_vlm()
         if self._lm_client is not None:
             return self._call_local_vlm(prompt, image_b64)
         logger.error("VLM バックエンドが設定されていません")
@@ -322,58 +350,28 @@ class VisionCanvasController:
     # ──────────────────────────────────────────
 
     def _parse_coordinates(self, response: str) -> list[dict]:
-        """VLM レスポンスから複数の座標を抽出する。"""
-        try:
-            # JSON ブロックを抽出
-            json_str = self._extract_json(response)
-            if not json_str:
-                return []
-            data = json.loads(json_str)
-            if isinstance(data, dict) and "pieces" in data:
-                return data["pieces"]
-            if isinstance(data, list):
-                return data
-            return []
-        except (json.JSONDecodeError, KeyError):
-            return []
+        """VLM レスポンスから複数の座標を抽出する（core.vision_utils へ委譲）。"""
+        return parse_coordinates(response)
 
     def _parse_single_coordinate(self, response: str) -> tuple[int, int] | None:
-        """VLM レスポンスから単一の座標を抽出する。"""
-        try:
-            json_str = self._extract_json(response)
-            if not json_str:
-                return None
-            data = json.loads(json_str)
-            if isinstance(data, dict) and "px_x" in data and "px_y" in data:
-                return (int(data["px_x"]), int(data["px_y"]))
-            return None
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+        """VLM レスポンスから単一の座標を抽出する（core.vision_utils へ委譲）。"""
+        return parse_single_coordinate(response)
 
     @staticmethod
     def _extract_json(text: str) -> str | None:
-        """テキストから JSON 部分を抽出する。"""
-        # ```json ... ``` ブロック
-        m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if m:
-            return m.group(1)
-        # 裸の { ... }
-        first = text.find("{")
-        last = text.rfind("}")
-        if first != -1 and last != -1 and last > first:
-            return text[first:last + 1]
-        return None
+        """テキストから JSON 部分を抽出する（core.vision_utils へ委譲）。"""
+        return extract_json(text)
 
     def _validate_coordinates(
         self, coords: list[dict], viewport: tuple[int, int]
     ) -> list[dict]:
-        """座標をビューポート範囲内に検証・フィルタする。"""
+        """座標をビューポート範囲内に検証・フィルタし、グリッドスナップする。"""
         valid = []
         for c in coords:
             try:
                 px_x = int(c.get("px_x", 0))
                 px_y = int(c.get("px_y", 0))
-                if self._is_in_viewport((px_x, px_y), viewport):
+                if is_in_viewport((px_x, px_y), viewport):
                     snapped = self._snap_to_grid((px_x, px_y))
                     c["px_x"] = snapped[0]
                     c["px_y"] = snapped[1]
@@ -387,8 +385,8 @@ class VisionCanvasController:
     def _is_in_viewport(
         coords: tuple[int, int], viewport: tuple[int, int]
     ) -> bool:
-        """座標がビューポート内かチェックする。"""
-        return 0 <= coords[0] <= viewport[0] and 0 <= coords[1] <= viewport[1]
+        """座標がビューポート内かチェックする（core.vision_utils へ委譲）。"""
+        return is_in_viewport(coords, viewport)
 
     @staticmethod
     def _snap_to_grid(coords: tuple[int, int]) -> tuple[int, int]:
