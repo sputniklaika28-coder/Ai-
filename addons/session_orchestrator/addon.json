@@ -1,0 +1,22 @@
+{
+  "id": "session_orchestrator",
+  "name": "セッションオーケストレーター",
+  "version": "1.0.0",
+  "type": "tool",
+  "description": "シナリオ概要・あらすじ・PCスキル・セッション設定・履歴・現在のステータス・シナリオ進行を統合し、セッションを事前準備して進行する。セッションごとのハウスルールと追加のミニゲームを利用でき、その他の設定より優先される。セッション無しでも動作する。",
+  "author": "core",
+  "dependencies": ["session_manager"],
+  "entry_point": "addon.py",
+  "class_name": "SessionOrchestratorAddon",
+  "tools": [
+    "prepare_session",
+    "start_orchestrated_session",
+    "end_orchestrated_session",
+    "get_effective_session_config",
+    "add_house_rule",
+    "add_mini_game",
+    "list_active_house_rules",
+    "list_active_mini_games",
+    "save_base_session_config"
+  ]
+}
