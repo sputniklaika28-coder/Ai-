@@ -36,6 +36,8 @@ except ImportError:
     print("❌ エラー: core/lm_client.py が見つかりません。プロジェクトルートから起動してください。")
     sys.exit(1)
 
+from addons.tactical_exorcist import trpg_data as TD
+
 
 # ── ユーティリティ ────────────────────────────────────────────────────────────
 
@@ -107,6 +109,18 @@ class TacticalExorcistCharMaker(tk.Tk):
         self.var_ireikigu = tk.IntVar(value=0)
         self.var_meifuku = tk.IntVar(value=0)
         self.var_jutsuyen = tk.IntVar(value=0)
+
+        # 装備・所属 (v1.0 仕様)
+        self.var_org_display = tk.StringVar(value="")
+        self.var_armor_display = tk.StringVar(value="")
+        self.var_weapon1_display = tk.StringVar(value="")
+        self.var_weapon2_display = tk.StringVar(value="")
+        self.var_skill_checks: dict[str, tk.BooleanVar] = {
+            k: tk.BooleanVar(value=False) for k in TD.SKILLS
+        }
+        # Arts は Listbox で複数選択するため BoolVar ではなく選択状態を保持する
+        self._selected_art_keys: list[str] = []
+        self.var_notes = tk.StringVar(value="")
 
     # ── UI 構築 ───────────────────────────────────────────────────────────────
 
@@ -193,11 +207,19 @@ class TacticalExorcistCharMaker(tk.Tk):
         row("術延起点:", self.var_jutsuyen, 12, 0)
 
     def _build_right(self, parent: ttk.Frame) -> None:
-        f_memo = ttk.LabelFrame(parent, text="3. キャラ設定・メモ", padding=8)
-        f_memo.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        self.text_memo = scrolledtext.ScrolledText(f_memo, font=("", 10), wrap=tk.WORD)
+        # タブ1: キャラ設定・メモ
+        tab_memo = ttk.Frame(notebook, padding=8)
+        notebook.add(tab_memo, text="3. キャラ設定・メモ")
+        self.text_memo = scrolledtext.ScrolledText(tab_memo, font=("", 10), wrap=tk.WORD)
         self.text_memo.pack(fill=tk.BOTH, expand=True)
+
+        # タブ2: 装備・所属 (v1.0 仕様)
+        tab_equip = ttk.Frame(notebook, padding=8)
+        notebook.add(tab_equip, text="装備・所属 (v1.0)")
+        self._build_equipment_tab(tab_equip)
 
         f_out = ttk.LabelFrame(parent, text="4. 保存と出力", padding=8)
         f_out.pack(fill=tk.X)
@@ -213,6 +235,157 @@ class TacticalExorcistCharMaker(tk.Tk):
         ttk.Button(
             f_out, text="📋 ココフォリア用コマとしてコピー", command=self._copy_ccfolia
         ).pack(fill=tk.X, pady=2)
+
+    # ── 装備・所属タブ (v1.0) ────────────────────────────────────────────────
+
+    def _build_equipment_tab(self, parent: ttk.Frame) -> None:
+        """組織・武器・防具・スキル・術の選択 UI と副次ステータス自動算出ボタン。"""
+        # 組織
+        row = 0
+        ttk.Label(parent, text="所属組織:").grid(row=row, column=0, sticky="w", pady=2)
+        self.cmb_org = ttk.Combobox(
+            parent,
+            textvariable=self.var_org_display,
+            values=[label for _, label in TD.org_choices()],
+            state="readonly",
+            width=32,
+        )
+        self.cmb_org.grid(row=row, column=1, sticky="ew", pady=2)
+        row += 1
+
+        # 防具
+        ttk.Label(parent, text="防具:").grid(row=row, column=0, sticky="w", pady=2)
+        self.cmb_armor = ttk.Combobox(
+            parent,
+            textvariable=self.var_armor_display,
+            values=[label for _, label in TD.armor_choices()],
+            state="readonly",
+            width=32,
+        )
+        self.cmb_armor.grid(row=row, column=1, sticky="ew", pady=2)
+        row += 1
+
+        # 武器 x2
+        ttk.Label(parent, text="武器1:").grid(row=row, column=0, sticky="w", pady=2)
+        self.cmb_weapon1 = ttk.Combobox(
+            parent,
+            textvariable=self.var_weapon1_display,
+            values=[""] + [label for _, label in TD.weapon_choices()],
+            state="readonly",
+            width=32,
+        )
+        self.cmb_weapon1.grid(row=row, column=1, sticky="ew", pady=2)
+        row += 1
+
+        ttk.Label(parent, text="武器2:").grid(row=row, column=0, sticky="w", pady=2)
+        self.cmb_weapon2 = ttk.Combobox(
+            parent,
+            textvariable=self.var_weapon2_display,
+            values=[""] + [label for _, label in TD.weapon_choices()],
+            state="readonly",
+            width=32,
+        )
+        self.cmb_weapon2.grid(row=row, column=1, sticky="ew", pady=2)
+        row += 1
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6
+        )
+        row += 1
+
+        # スキル (チェックボックス)
+        ttk.Label(parent, text="スキル (D7/F):").grid(row=row, column=0, sticky="nw", pady=2)
+        f_skills = ttk.Frame(parent)
+        f_skills.grid(row=row, column=1, sticky="ew", pady=2)
+        for i, (key, label) in enumerate(TD.skill_choices()):
+            ttk.Checkbutton(f_skills, text=label, variable=self.var_skill_checks[key]).grid(
+                row=i // 2, column=i % 2, sticky="w", padx=4
+            )
+        row += 1
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6
+        )
+        row += 1
+
+        # 術 (Listbox 複数選択)
+        ttk.Label(parent, text="祓魔術 (D4/I):").grid(row=row, column=0, sticky="nw", pady=2)
+        f_arts = ttk.Frame(parent)
+        f_arts.grid(row=row, column=1, sticky="ew", pady=2)
+        self.lb_arts = tk.Listbox(f_arts, selectmode=tk.MULTIPLE, height=8, exportselection=False)
+        self._art_keys_ordered = [k for k, _ in TD.art_choices()]
+        for _, label in TD.art_choices():
+            self.lb_arts.insert(tk.END, label)
+        self.lb_arts.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(f_arts, orient=tk.VERTICAL, command=self.lb_arts.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.lb_arts.config(yscrollcommand=sb.set)
+        row += 1
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6
+        )
+        row += 1
+
+        ttk.Button(
+            parent, text="🧮 副次ステータスを自動算出", command=self._apply_derived_stats
+        ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
+        row += 1
+
+        ttk.Label(
+            parent, textvariable=self.var_notes, foreground="gray", wraplength=320, justify="left"
+        ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=2)
+
+        parent.columnconfigure(1, weight=1)
+
+    # ── 表示ラベル ⇄ キー変換 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _label_to_key(display: str, choices: list[tuple[str, str]]) -> str | None:
+        for k, label in choices:
+            if label == display:
+                return k
+        return None
+
+    @staticmethod
+    def _key_to_label(key: str, choices: list[tuple[str, str]]) -> str:
+        for k, label in choices:
+            if k == key:
+                return label
+        return ""
+
+    def _selected_skill_keys(self) -> list[str]:
+        return [k for k, var in self.var_skill_checks.items() if var.get()]
+
+    def _selected_art_keys_from_ui(self) -> list[str]:
+        indices = self.lb_arts.curselection()
+        return [self._art_keys_ordered[i] for i in indices]
+
+    def _apply_derived_stats(self) -> None:
+        """UI の選択から副次ステータスを算出して各 IntVar に反映する。"""
+        org_key = self._label_to_key(self.var_org_display.get(), TD.org_choices())
+        armor_key = self._label_to_key(self.var_armor_display.get(), TD.armor_choices())
+        skill_keys = self._selected_skill_keys()
+        try:
+            d = TD.derive_stats(
+                body=self.var_body.get(),
+                soul=self.var_soul.get(),
+                skill=self.var_skill.get(),
+                magic=self.var_magic.get(),
+                org=org_key,
+                armor=armor_key,
+                skill_keys=skill_keys,
+            )
+        except tk.TclError:
+            messagebox.showerror("エラー", "B/R/K/A は整数で入力してください。")
+            return
+        self.var_hp.set(d.hp)
+        self.var_sp.set(d.mp)
+        self.var_mobility.set(d.mv)
+        self.var_evasion.set(d.ed)
+        self.var_armor.set(d.arm)
+        self.var_notes.set(" / ".join(d.notes) if d.notes else "算出完了")
+        self.status_var.set(f"✓ 副次ステータス算出: HP{d.hp} MP{d.mp} MV{d.mv} ED{d.ed} ARM{d.arm}")
 
     # ── キャラクター I/O ──────────────────────────────────────────────────────
 
@@ -260,6 +433,21 @@ class TacticalExorcistCharMaker(tk.Tk):
             "jutsuyen": self.var_jutsuyen.get(),
         }
 
+        # v1.0 仕様の所属・装備・スキル・術キー
+        org_key = self._label_to_key(self.var_org_display.get(), TD.org_choices())
+        armor_key = self._label_to_key(self.var_armor_display.get(), TD.armor_choices())
+        weapon_keys = [
+            self._label_to_key(self.var_weapon1_display.get(), TD.weapon_choices()),
+            self._label_to_key(self.var_weapon2_display.get(), TD.weapon_choices()),
+        ]
+        data["trpg_v1"] = {
+            "org": org_key,
+            "armor": armor_key,
+            "weapons": [k for k in weapon_keys if k],
+            "skill_keys": self._selected_skill_keys(),
+            "art_keys": self._selected_art_keys_from_ui(),
+        }
+
         _save_json(SAVED_PCS_DIR / f"{name}.json", data)
         self.status_var.set(f"✓ {name} を保存しました！")
         self._refresh_saved_list()
@@ -305,6 +493,30 @@ class TacticalExorcistCharMaker(tk.Tk):
 
         self.text_memo.delete("1.0", tk.END)
         self.text_memo.insert("1.0", data.get("memo", ""))
+
+        # v1.0 仕様: 所属・装備・スキル・術の復元
+        trpg_v1 = data.get("trpg_v1", {})
+        self.var_org_display.set(self._key_to_label(trpg_v1.get("org") or "", TD.org_choices()))
+        self.var_armor_display.set(
+            self._key_to_label(trpg_v1.get("armor") or "", TD.armor_choices())
+        )
+        weapons = trpg_v1.get("weapons", [])
+        self.var_weapon1_display.set(
+            self._key_to_label(weapons[0], TD.weapon_choices()) if len(weapons) > 0 else ""
+        )
+        self.var_weapon2_display.set(
+            self._key_to_label(weapons[1], TD.weapon_choices()) if len(weapons) > 1 else ""
+        )
+        skill_keys = set(trpg_v1.get("skill_keys", []))
+        for k, var in self.var_skill_checks.items():
+            var.set(k in skill_keys)
+        art_keys = set(trpg_v1.get("art_keys", []))
+        if hasattr(self, "lb_arts"):
+            self.lb_arts.selection_clear(0, tk.END)
+            for i, k in enumerate(self._art_keys_ordered):
+                if k in art_keys:
+                    self.lb_arts.selection_set(i)
+        self.var_notes.set("")
 
     # ── AI生成 ────────────────────────────────────────────────────────────────
 
