@@ -521,25 +521,54 @@ class TacticalExorcistCharMaker(tk.Tk):
     # ── AI生成 ────────────────────────────────────────────────────────────────
 
     def _build_char_prompt(self, user_req: str) -> str:
+        org_list = ", ".join(f"{k}({v['name']})" for k, v in TD.ORGS.items())
+        weapon_list = ", ".join(f"{k}({v['name']})" for k, v in TD.WEAPONS.items())
+        armor_list = ", ".join(f"{k}({v['name']})" for k, v in TD.ARMORS.items())
+        skill_list = ", ".join(f"{k}({v['name']})" for k, v in TD.SKILLS.items())
+        art_list = ", ".join(f"{k}({v['name']})" for k, v in TD.ARTS.items())
         return f"""
-あなたはTRPG『タクティカル祓魔師』のプレイヤーです。
-ユーザーの要望に合わせて、以下のJSONフォーマットの空欄を論理的に埋めてください。
-武器や特技などはユーザーの要望に合わせて複数個作成してください。
+あなたはTRPG『タクティカル祓魔師』(world_setting v1.0) のプレイヤーです。
+ユーザーの要望に合わせて、以下のJSONスキーマを論理的に埋めてください。
 【重要】必ず有効なJSON形式のみを出力し、Markdownコードブロック(```json)などは使用しないでください。
+副次ステータス (hp/sp/mobility/evasion/armor) は後でコード側で B/R/K と装備から
+自動算出するため、AI 側では値を入れずに "body/soul/skill/magic" と "trpg_v1" を
+正しく埋めることに集中してください。
+
+■ 選べる所属組織 (trpg_v1.org に キー を入れる):
+{org_list}
+
+■ 選べる武器 (trpg_v1.weapons に キー の配列 最大 2 つ):
+{weapon_list}
+
+■ 選べる防具 (trpg_v1.armor に キー):
+{armor_list}
+
+■ 選べるスキル (trpg_v1.skill_keys に キー の配列):
+{skill_list}
+
+■ 選べる祓魔術 (trpg_v1.art_keys に キー の配列、A(magic) が 1 以上なら必須):
+{art_list}
 
 ユーザー要望: {user_req}
 
 {{
-  "name": "キャラクターの名前", "alias": "二つ名",
-  "hp": 15, "sp": 15, "evasion": 2, "mobility": 3, "armor": 0,
-  "body": 3, "soul": 3, "skill": 3, "magic": 3,
+  "name": "キャラクターの名前",
+  "alias": "二つ名",
+  "body": 4, "soul": 3, "skill": 4, "magic": 1,
   "items": {{"katashiro": 1, "haraegushi": 0, "shimenawa": 0, "juryudan": 0, "ireikigu": 0, "meifuku": 0, "jutsuyen": 0}},
   "memo": "キャラクターの背景や性格",
+  "trpg_v1": {{
+    "org": "MOE",
+    "armor": "medium",
+    "weapons": ["medium_mel", "small_rng"],
+    "skill_keys": ["evasion", "endurance"],
+    "art_keys": ["anti_step"]
+  }},
   "skills": [
-    {{"name": "戦術機動", "description": "手番開始時に使用可能。『難易度:NORMAL』で【巧】判定を行う。成功した場合、即座に回避ダイスを2つ獲得し、更にその手番中は最大で【機動力】の2倍のマスを移動できる。 ただし、手番中に行う能動的な行動の判定の難易度が1段階上昇する。【巧】判定に失敗した場合、回避ダイスの獲得と移動距離の増加は行われず、判定の難易度上昇だけを被る。"}}
+    {{"name": "戦術機動", "description": "自動取得。手番開始時に【巧】判定(N=4)。成功で回避D+2・移動力2倍、能動判定DIF+1。"}}
   ],
   "weapons": [
-    {{"name": "大型遠隔祭具", "description": "【巧】の値を参照して「遠隔攻撃」を行い、攻撃成功時、「5」点の物理ダメージを与える。"}}
+    {{"name": "中型近接祭具", "description": "【体】または【巧】参照の近接攻撃。命中で 3 点の物理ダメージ。"}}
   ]
 }}
 """
@@ -574,7 +603,12 @@ class TacticalExorcistCharMaker(tk.Tk):
         try:
             data = json.loads(clean)
             self._apply_json_to_ui(data)
-            self.status_var.set("✓ 生成完了！内容を調整してください")
+            # v1.0 仕様: trpg_v1 が含まれていれば副次ステータスを自動算出で上書き
+            if data.get("trpg_v1"):
+                self._apply_derived_stats()
+                self.status_var.set("✓ 生成完了＋副次ステータス自動算出しました")
+            else:
+                self.status_var.set("✓ 生成完了！内容を調整してください")
         except Exception as e:
             self.status_var.set("❌ JSONパースエラー")
             print(f"エラー詳細: {e}")
