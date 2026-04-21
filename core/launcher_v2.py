@@ -36,7 +36,6 @@ CONFIGS_DIR     = BASE_DIR / "configs"
 CHARACTERS_JSON = CONFIGS_DIR / "characters.json"
 PROMPTS_JSON    = CONFIGS_DIR / "prompts.json"
 SESSION_JSON    = CONFIGS_DIR / "session_config.json"
-WORLD_SETTING_JSON = CONFIGS_DIR / "world_setting.json"
 SESSIONS_DIR    = BASE_DIR / "sessions"
 SAVED_PCS_DIR   = CONFIGS_DIR / "saved_pcs"
 CORE_DIR        = BASE_DIR / "core"
@@ -381,7 +380,6 @@ def _post_to_main(fn) -> None:
 _NAV_ITEMS: list[tuple[str, str]] = [
     ("home",   "🚀  ホーム"),
     ("actors", "👥  アクター"),
-    ("world",  "🌍  世界観"),
     ("ai",     "📝  AI設定"),
     ("system", "⚙️   システム"),
 ]
@@ -2453,166 +2451,6 @@ class ActorsView(ctk.CTkFrame):
 
 
 # ─────────────────────────────────────────────────────────────────
-# 世界観ビュー（WorldSettingTab 移植）
-# ─────────────────────────────────────────────────────────────────
-
-class WorldView(ctk.CTkFrame):
-    """世界観・ルール設定エディター"""
-
-    def __init__(self, parent):
-        super().__init__(parent, fg_color=AppTheme.BG, corner_radius=0)
-        self._text_boxes: dict[str, ctk.CTkTextbox] = {}
-        self._rule_vars: dict[str, tk.BooleanVar] = {}
-        self._rule_boxes: dict[str, ctk.CTkTextbox] = {}
-        self._world_file: Path = WORLD_SETTING_JSON
-        self._system_name: str = ""
-        self._build_ui()
-        self.load()
-
-    def _build_ui(self) -> None:
-        # ヘッダー
-        header = ctk.CTkFrame(self, fg_color=AppTheme.SURFACE, corner_radius=0, height=48)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        ctk.CTkLabel(
-            header,
-            text="🌍  世界観・ルール設定",
-            font=ctk.CTkFont(family="Yu Gothic UI", size=14, weight="bold"),
-            text_color=AppTheme.TEXT_HEAD,
-        ).pack(side="left", padx=16, pady=10)
-
-        self._system_banner_var = tk.StringVar(value="")
-        ctk.CTkLabel(
-            header,
-            textvariable=self._system_banner_var,
-            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
-            text_color=AppTheme.TEXT_DIM,
-        ).pack(side="left", padx=8)
-
-        # 保存ボタン群（ヘッダー右）
-        self._status_var = tk.StringVar(value="")
-        ctk.CTkLabel(
-            header,
-            textvariable=self._status_var,
-            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
-            text_color=AppTheme.TEXT_DIM,
-        ).pack(side="right", padx=8)
-        ctk.CTkButton(
-            header, text="再読込", width=70, height=30,
-            fg_color="#333333", hover_color="#444444",
-            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
-            command=self.load,
-        ).pack(side="right", padx=4)
-        ctk.CTkButton(
-            header, text="保存", width=70, height=30,
-            fg_color=AppTheme.ACCENT, hover_color="#005a9e",
-            font=ctk.CTkFont(family="Yu Gothic UI", size=11),
-            command=self.save,
-        ).pack(side="right", padx=(0, 4))
-
-        # CTkTabview
-        self._tab = ctk.CTkTabview(
-            self, fg_color=AppTheme.SURFACE, corner_radius=0,
-            segmented_button_fg_color=AppTheme.BG,
-            segmented_button_selected_color=AppTheme.ACCENT,
-            segmented_button_unselected_color="#333333",
-            text_color=AppTheme.TEXT,
-        )
-        self._tab.pack(fill="both", expand=True)
-
-        # ── 基本設定タブ ─────────────────────────────────────────
-        basic = self._tab.add("基本設定")
-        basic_scroll = ctk.CTkScrollableFrame(basic, fg_color="transparent")
-        basic_scroll.pack(fill="both", expand=True)
-
-        fields = [
-            ("world_lore",       "🌐 世界観・基本設定",            8),
-            ("session_scenario", "📜 シナリオ概要・あらすじ",       5),
-            ("pc_skills",        "⚔️  PCスキル・現在のステータス",  6),
-            ("gm_instructions",  "📋 GMへの追加指示",               4),
-        ]
-        for key, label, height in fields:
-            ctk.CTkLabel(
-                basic_scroll, text=label,
-                font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
-                text_color=AppTheme.TEXT,
-            ).pack(anchor="w", padx=10, pady=(10, 2))
-            box = ctk.CTkTextbox(
-                basic_scroll, height=height * 18,
-                font=ctk.CTkFont(family="Yu Gothic UI", size=10),
-                fg_color="#1a1a1a", text_color=AppTheme.TEXT, wrap="word",
-            )
-            box.pack(fill="x", padx=10, pady=(0, 2))
-            self._text_boxes[key] = box
-
-        # ── ルールタブ群 ──────────────────────────────────────────
-        rule_tabs = [
-            ("シナリオ進行", "scenario_data_enabled",    "scenario_data"),
-            ("追加ルール",   "additional_rules_enabled", "additional_rules"),
-            ("コアルール",   "core_rules_enabled",       "core_rules"),
-            ("キャラ作成",   "char_creation_enabled",    "char_creation"),
-            ("成長ルール",   "growth_rules_enabled",     "growth_rules"),
-        ]
-        for tab_name, var_key, txt_key in rule_tabs:
-            frame = self._tab.add(tab_name)
-            var = tk.BooleanVar(value=False)
-            self._rule_vars[var_key] = var
-
-            sw_row = ctk.CTkFrame(frame, fg_color="transparent")
-            sw_row.pack(fill="x", padx=10, pady=(10, 6))
-            ctk.CTkSwitch(
-                sw_row,
-                text="このデータをAIの記憶に読み込ませる",
-                variable=var, onvalue=True, offvalue=False,
-                fg_color="#333333", progress_color=AppTheme.ACCENT,
-                font=ctk.CTkFont(family="Yu Gothic UI", size=10),
-                text_color=AppTheme.TEXT,
-            ).pack(side="left")
-
-            box = ctk.CTkTextbox(
-                frame,
-                font=ctk.CTkFont(family="Yu Gothic UI", size=10),
-                fg_color="#1a1a1a", text_color=AppTheme.TEXT, wrap="word",
-            )
-            box.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-            self._rule_boxes[txt_key] = box
-
-    def load(self) -> None:
-        data = load_json(self._world_file)
-        for key, box in self._text_boxes.items():
-            box.delete("0.0", "end")
-            box.insert("0.0", data.get(key, ""))
-        for var_key, var in self._rule_vars.items():
-            var.set(data.get(var_key, False))
-        for txt_key, box in self._rule_boxes.items():
-            box.delete("0.0", "end")
-            box.insert("0.0", data.get(txt_key, ""))
-        self._status_var.set("読み込み完了")
-
-    def save(self) -> None:
-        data = load_json(self._world_file)
-        for key, box in self._text_boxes.items():
-            data[key] = box.get("0.0", "end").strip()
-        for var_key, var in self._rule_vars.items():
-            data[var_key] = var.get()
-        for txt_key, box in self._rule_boxes.items():
-            data[txt_key] = box.get("0.0", "end").strip()
-        save_json(self._world_file, data)
-        self._status_var.set("保存しました")
-        self.after(3_000, lambda: self._status_var.set(""))
-
-    def on_show(self) -> None:
-        self.load()
-
-    def on_system_changed(self, entry) -> None:
-        """サイドバーでシステムが切り替わった際に呼ばれる。"""
-        self._world_file = entry.world_setting_file
-        self._system_name = entry.label
-        self._system_banner_var.set(f"現在のシステム: {entry.label}")
-        self.load()
-
-
-# ─────────────────────────────────────────────────────────────────
 # 汎用辞書入力ダイアログ（ハウスルール／ミニゲーム編集用）
 # ─────────────────────────────────────────────────────────────────
 
@@ -3140,9 +2978,12 @@ class AIConfigView(ctk.CTkFrame):
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # セッションごとのハウスルール／ミニゲームはこのビュー内でメモリ保持
+        # セッションごとの構造化データはこのビュー内でメモリ保持
         self._house_rules: list[dict] = []
         self._mini_games: list[dict] = []
+        self._pc_skills: list[dict] = []
+        # 世界観ルール設定（旧 WorldView）をここに集約するための textbox 群
+        self._sess_text_boxes: dict[str, ctk.CTkTextbox] = {}
 
         # セッション情報
         info_frame = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
@@ -3192,6 +3033,72 @@ class AIConfigView(ctk.CTkFrame):
             char_frame, fg_color="transparent", height=150
         )
         self._char_check_frame.pack(fill="x", padx=10, pady=(0, 8))
+
+        # ── シナリオ／ステータス／GM指示（旧 WorldView 集約） ────────
+        scenario_frame = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
+        scenario_frame.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            scenario_frame, text="シナリオ・進行・GM指示",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            scenario_frame,
+            text="世界観・コアルールはルールシステム（アドオン）が提供。ここはセッション固有の内容のみ。",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+
+        text_fields = [
+            ("scenario_overview",       "📜 シナリオ概要",        5),
+            ("scenario_synopsis",       "📖 あらすじ",            5),
+            ("scenario_progress_notes", "🗺️ シナリオ進行",        6),
+            ("pc_status_notes",         "❤️ 現在のステータス",    5),
+            ("gm_instructions",         "📋 GMへの追加指示",      4),
+        ]
+        for key, label, height in text_fields:
+            ctk.CTkLabel(
+                scenario_frame, text=label,
+                font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+                text_color=AppTheme.TEXT,
+            ).pack(anchor="w", padx=10, pady=(8, 2))
+            box = ctk.CTkTextbox(
+                scenario_frame, height=height * 18,
+                font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+                fg_color="#111111", text_color=AppTheme.TEXT, wrap="word",
+            )
+            box.pack(fill="x", padx=10, pady=(0, 2))
+            self._sess_text_boxes[key] = box
+
+        # 末尾にパディングを確保
+        ctk.CTkFrame(scenario_frame, fg_color="transparent", height=4).pack()
+
+        # ── PCスキル（構造化） ────────────────────────────────
+        skills_frame = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
+        skills_frame.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            skills_frame, text="⚔️ PCスキル",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=11, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            skills_frame,
+            text="キャラクター毎の技能値を管理。SessionConfig.pc_skills として保存。",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            text_color=AppTheme.TEXT_DIM,
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+        self._skills_list_frame = ctk.CTkScrollableFrame(
+            skills_frame, fg_color="transparent", height=120,
+        )
+        self._skills_list_frame.pack(fill="x", padx=10, pady=(0, 4))
+        skills_btn_row = ctk.CTkFrame(skills_frame, fg_color="transparent")
+        skills_btn_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkButton(
+            skills_btn_row, text="＋ スキル追加", height=28,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10),
+            command=self._add_pc_skill,
+        ).pack(side="left", padx=(0, 4))
 
         # ── ハウスルール ───────────────────────────────────────
         rules_frame = ctk.CTkFrame(scroll, fg_color="#1e1e1e", corner_radius=6)
@@ -3298,6 +3205,9 @@ class AIConfigView(ctk.CTkFrame):
         data["selected_characters"] = selected
         data["house_rules"] = list(self._house_rules)
         data["mini_games"] = list(self._mini_games)
+        data["pc_skills"] = list(self._pc_skills)
+        for key, box in self._sess_text_boxes.items():
+            data[key] = box.get("0.0", "end").strip()
         save_json(SESSION_JSON, data)
         messagebox.showinfo("完了", "セッション設定を保存しました",
                             parent=self.winfo_toplevel())
@@ -3310,8 +3220,13 @@ class AIConfigView(ctk.CTkFrame):
         self._sess_refresh_chars(selected_ids=data.get("selected_characters"))
         self._house_rules = [dict(r) for r in data.get("house_rules", []) if isinstance(r, dict)]
         self._mini_games = [dict(g) for g in data.get("mini_games", []) if isinstance(g, dict)]
+        self._pc_skills = [dict(s) for s in data.get("pc_skills", []) if isinstance(s, dict)]
+        for key, box in self._sess_text_boxes.items():
+            box.delete("0.0", "end")
+            box.insert("0.0", data.get(key, ""))
         self._refresh_house_rules()
         self._refresh_mini_games()
+        self._refresh_pc_skills()
 
     # ── ハウスルール編集 ──────────────────────────────────────────
 
@@ -3534,6 +3449,115 @@ class AIConfigView(ctk.CTkFrame):
                                parent=self.winfo_toplevel()):
             del self._mini_games[idx]
             self._refresh_mini_games()
+
+    # ── PCスキル編集 ─────────────────────────────────────────────
+
+    def _refresh_pc_skills(self) -> None:
+        for w in self._skills_list_frame.winfo_children():
+            w.destroy()
+        if not self._pc_skills:
+            ctk.CTkLabel(
+                self._skills_list_frame,
+                text="（未登録）",
+                font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+                text_color=AppTheme.TEXT_DIM,
+            ).pack(anchor="w", padx=4, pady=4)
+            return
+        for idx, skill in enumerate(self._pc_skills):
+            self._build_pc_skill_row(idx, skill)
+
+    def _build_pc_skill_row(self, idx: int, skill: dict) -> None:
+        row = ctk.CTkFrame(self._skills_list_frame, fg_color="#111111", corner_radius=4)
+        row.pack(fill="x", pady=1, padx=2)
+        label = (
+            f"{skill.get('character', '?')} / {skill.get('name', '(名称未設定)')}  "
+            f"= {skill.get('value', 0)}"
+        )
+        ctk.CTkLabel(
+            row, text=label,
+            font=ctk.CTkFont(family="Yu Gothic UI", size=10, weight="bold"),
+            text_color=AppTheme.TEXT,
+        ).pack(side="left", padx=8)
+        memo = skill.get("memo", "") or ""
+        if memo:
+            ctk.CTkLabel(
+                row,
+                text=f" — {memo[:40]}{'…' if len(memo) > 40 else ''}",
+                font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+                text_color=AppTheme.TEXT_DIM,
+            ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            row, text="編集", width=50, height=22,
+            fg_color="#333333", hover_color="#444444",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=lambda i=idx: self._edit_pc_skill(i),
+        ).pack(side="right", padx=2)
+        ctk.CTkButton(
+            row, text="削除", width=50, height=22,
+            fg_color="#6b1a1a", hover_color="#8b2a2a",
+            font=ctk.CTkFont(family="Yu Gothic UI", size=9),
+            command=lambda i=idx: self._delete_pc_skill(i),
+        ).pack(side="right", padx=2)
+
+    def _add_pc_skill(self) -> None:
+        skill = _SimpleDictDialog.ask(
+            self.winfo_toplevel(),
+            title="PCスキル追加",
+            fields=[
+                ("character", "キャラクター名", ""),
+                ("name", "スキル名", ""),
+                ("value", "技能値 (int)", "0"),
+                ("memo", "メモ", ""),
+            ],
+        )
+        if skill is None:
+            return
+        if not skill.get("name"):
+            messagebox.showwarning("入力エラー", "スキル名は必須です",
+                                   parent=self.winfo_toplevel())
+            return
+        try:
+            skill["value"] = int(skill.get("value") or 0)
+        except ValueError:
+            skill["value"] = 0
+        self._pc_skills.append(skill)
+        self._refresh_pc_skills()
+
+    def _edit_pc_skill(self, idx: int) -> None:
+        if not (0 <= idx < len(self._pc_skills)):
+            return
+        current = self._pc_skills[idx]
+        edited = _SimpleDictDialog.ask(
+            self.winfo_toplevel(),
+            title="PCスキル編集",
+            fields=[
+                ("character", "キャラクター名", current.get("character", "")),
+                ("name", "スキル名", current.get("name", "")),
+                ("value", "技能値 (int)", str(current.get("value", 0))),
+                ("memo", "メモ", current.get("memo", "")),
+            ],
+        )
+        if edited is None:
+            return
+        if not edited.get("name"):
+            messagebox.showwarning("入力エラー", "スキル名は必須です",
+                                   parent=self.winfo_toplevel())
+            return
+        try:
+            edited["value"] = int(edited.get("value") or 0)
+        except ValueError:
+            edited["value"] = 0
+        self._pc_skills[idx] = edited
+        self._refresh_pc_skills()
+
+    def _delete_pc_skill(self, idx: int) -> None:
+        if not (0 <= idx < len(self._pc_skills)):
+            return
+        name = self._pc_skills[idx].get("name", "")
+        if messagebox.askyesno("確認", f"'{name}' を削除しますか？",
+                               parent=self.winfo_toplevel()):
+            del self._pc_skills[idx]
+            self._refresh_pc_skills()
 
     # ── ジェネレータータブ ────────────────────────────────────────
 
@@ -4261,7 +4285,6 @@ class TacticalAILauncherV2(ctk.CTk):
     def _init_views(self) -> None:
         self._views["home"]   = HomeView(self.content_area)
         self._views["actors"] = ActorsView(self.content_area)
-        self._views["world"]  = WorldView(self.content_area)
         self._views["ai"]     = AIConfigView(self.content_area)
         self._views["system"] = SystemView(self.content_area)
 

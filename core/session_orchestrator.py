@@ -192,8 +192,14 @@ class SessionOrchestrator:
             eff.scenario_overview = a.scenario_overview
         if a.scenario_synopsis:
             eff.scenario_synopsis = a.scenario_synopsis
+        if a.scenario_progress_notes:
+            eff.scenario_progress_notes = a.scenario_progress_notes
         if a.pc_skills:
             eff.pc_skills = list(a.pc_skills)
+        if a.pc_status_notes:
+            eff.pc_status_notes = a.pc_status_notes
+        if a.gm_instructions:
+            eff.gm_instructions = a.gm_instructions
         if a.settings:
             eff.settings = {**eff.settings, **a.settings}
         # 現在のステータスは常にアクティブを採用（セッションのライブ状態）
