@@ -27,7 +27,7 @@ browser-use = [
     "browser-use>=0.1.40",
     "langchain-openai>=1.1.14",
     "langchain-anthropic>=0.1",
-    "python-dotenv>=1.0",
+    "python-dotenv>=1.2.2",
 ]
 vlm-agent = [
     "mss>=9.0",
