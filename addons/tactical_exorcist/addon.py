@@ -55,6 +55,7 @@ class TacticalExorcistAddon(RuleSystemAddon):
         self._prompts: dict | None = None
         self._world_setting: str = ""
         self._world_setting_json: dict | None = None
+        self._reference_character: str = ""
         self._generator = None
         self._lm_client = context.lm_client
 
@@ -79,6 +80,19 @@ class TacticalExorcistAddon(RuleSystemAddon):
                 logger.warning("世界観設定読み込み失敗: %s", e)
         else:
             logger.warning("世界観設定ファイルが見つかりません: %s", ws_path)
+
+        # 参考キャラクター (few-shot 用) 読み込み
+        ref_path = self._configs_dir / "reference_character.json"
+        if ref_path.exists():
+            try:
+                self._reference_character = ref_path.read_text(encoding="utf-8").strip()
+                logger.info(
+                    "参考キャラクター読み込み: %s (%d文字)",
+                    ref_path,
+                    len(self._reference_character),
+                )
+            except Exception as e:
+                logger.warning("参考キャラクター読み込み失敗: %s", e)
 
         # 世界観設定 (構造化 JSON) 読み込み: configs/ 配下を参照する
         ws_json_filename = self.manifest.world_setting_json or "world_setting.json"
@@ -159,66 +173,56 @@ class TacticalExorcistAddon(RuleSystemAddon):
     def build_vtt_piece_data(self, sheet: dict) -> dict:
         """シート dict から CCFolia 貼り付け用ペイロードを構築する。
 
-        status (10 項目), params (6 項目), commands にチャットパレット
-        （能力値判定・戦闘判定・支給装備説明・特技・武器）を含む。
+        AI 生成時に CCFolia 形式のペイロードが `_vtt_piece_raw` に保存されていれば
+        それをそのまま返す（AI が組んだ memo / commands / status / params を尊重）。
+        それ以外は flat フィールドから status(10項目)・params(6項目)・commands を
+        組み上げる従来ロジックへフォールバックする。
         """
-        name = sheet.get("name") or "名無し"
-        alias = sheet.get("alias", "")
-        memo_body = sheet.get("memo", "") or ""
-        memo = f"【二つ名】{alias}\n\n{memo_body}" if alias else memo_body
+        return build_ccfolia_piece_from_sheet(sheet)
 
-        def _i(key: str, default: int = 0) -> int:
-            v = sheet.get(key, default)
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                return default
+    def build_character_generation_prompt(
+        self, concept: str
+    ) -> tuple[str, str] | None:
+        """world_setting + 参考シートを丸ごと注入したキャラ生成プロンプトを返す。
 
-        items = sheet.get("items") or {}
+        qwen3 で実証済みの「ルール本文 + 参考1枚 → 完成 CCFolia JSON」方式。
+        """
+        if not self._world_setting:
+            return None
 
-        def _item(key: str) -> int:
-            v = items.get(key, 0)
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                return 0
+        system_prompt = (
+            "あなたはTRPG『タクティカル祓魔師』の熟練プレイヤー兼データジェネレーターです。\n"
+            "以下のルールブック本文を厳密に遵守し、ユーザー要望に合わせた "
+            "キャラクターデータを CCFolia 貼付用 JSON として生成してください。\n"
+            "\n"
+            "【絶対順守】\n"
+            "- 出力は `{\"kind\":\"character\",\"data\":{...}}` の JSON オブジェクト 1 個のみ。\n"
+            "- `data` には name, initiative, memo, commands, status, params を必ず含める。\n"
+            "- memo と commands は参考シートと同等の厚みでチャットパレット/判定式/装備説明を書く。\n"
+            "- status は体力/霊力/回避D+支給装備、params は体/霊/巧/術/機動力/装甲 を含める。\n"
+            "- 副次ステータス (HP=B, MP=R, MV=ceil(max(B,K)/2)+組織補正, "
+            "ED=max(B,R,K)+防具ED+組織補正, ARM=防具ARM) は本文に従って計算する。\n"
+            "- 余計な前置き・思考・マークダウンコードブロックは絶対に書かない。\n"
+            "- JSON 以外の文字を 1 字も出力しないこと。\n"
+            "\n"
+            "========== ルールブック本文 ==========\n"
+            f"{self._world_setting}\n"
+            "========== ルールブック本文 ここまで ==========\n"
+        )
+        if self._reference_character:
+            system_prompt += (
+                "\n========== 参考キャラクター（出力フォーマット例） ==========\n"
+                f"{self._reference_character}\n"
+                "========== 参考キャラクター ここまで ==========\n"
+                "上記と同じ JSON 構造・memo/commands の粒度で出力すること。\n"
+            )
 
-        hp = _i("hp", 15)
-        sp = _i("sp", 15)
-        evasion = _i("evasion", 2)
-        status = [
-            {"label": "体力", "value": hp, "max": hp},
-            {"label": "霊力", "value": sp, "max": sp},
-            {"label": "回避D", "value": evasion, "max": evasion},
-            {"label": "形代", "value": _item("katashiro"), "max": _item("katashiro")},
-            {"label": "祓串", "value": _item("haraegushi"), "max": _item("haraegushi")},
-            {"label": "注連鋼縄", "value": _item("shimenawa"), "max": _item("shimenawa")},
-            {"label": "呪瘤檀", "value": _item("juryudan"), "max": _item("juryudan")},
-            {"label": "医霊器具", "value": _item("ireikigu"), "max": _item("ireikigu")},
-            {"label": "名伏", "value": _item("meifuku"), "max": _item("meifuku")},
-            {"label": "術延起点", "value": _item("jutsuyen"), "max": _item("jutsuyen")},
-        ]
-        params = [
-            {"label": "体", "value": str(_i("body", 3))},
-            {"label": "霊", "value": str(_i("soul", 3))},
-            {"label": "巧", "value": str(_i("skill", 3))},
-            {"label": "術", "value": str(_i("magic", 3))},
-            {"label": "機動力", "value": str(_i("mobility", 3))},
-            {"label": "装甲", "value": str(_i("armor", 0))},
-        ]
-        commands = _build_ccfolia_commands(sheet)
-
-        return {
-            "kind": "character",
-            "data": {
-                "name": name,
-                "initiative": 0,
-                "memo": memo,
-                "commands": commands,
-                "status": status,
-                "params": params,
-            },
-        }
+        user_message = (
+            f"ユーザー要望: {concept}\n\n"
+            "この要望を満たすタクティカル祓魔師 PC を 1 人作成し、"
+            "CCFolia 貼付用 JSON だけを出力してください。"
+        )
+        return system_prompt, user_message
 
     def interpret_character_sheet(self, sheet_data: dict) -> str:
         """キャラクターシートを自然言語テキストに変換する。"""
@@ -419,8 +423,84 @@ class TacticalExorcistAddon(RuleSystemAddon):
 
 
 # ──────────────────────────────────────────
-# CCFolia コマンド文字列ビルダー
+# CCFolia ペイロードビルダー
 # ──────────────────────────────────────────
+
+
+def build_ccfolia_piece_from_sheet(sheet: dict) -> dict:
+    """シート dict から CCFolia 貼り付け用 `{"kind":"character","data":{...}}` を返す。
+
+    `_vtt_piece_raw` が残っていれば AI が組んだ memo/commands/status/params を
+    そのまま返す（名前だけは UI 側の変更を優先）。そうでなければ flat フィールド
+    から status(10項目)・params(6項目)・commands(固定テンプレ) を組み上げる。
+    """
+    raw = sheet.get("_vtt_piece_raw")
+    if (
+        isinstance(raw, dict)
+        and raw.get("kind") == "character"
+        and isinstance(raw.get("data"), dict)
+    ):
+        piece = {"kind": "character", "data": dict(raw["data"])}
+        ui_name = sheet.get("name")
+        if ui_name:
+            piece["data"]["name"] = ui_name
+        return piece
+
+    def _i(key: str, default: int = 0) -> int:
+        v = sheet.get(key, default)
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+
+    items = sheet.get("items") or {}
+
+    def _item(key: str) -> int:
+        v = items.get(key, 0)
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    name = sheet.get("name") or "名無し"
+    alias = sheet.get("alias", "")
+    memo_body = sheet.get("memo", "") or ""
+    memo = f"【二つ名】{alias}\n\n{memo_body}" if alias else memo_body
+
+    hp = _i("hp", 15)
+    sp = _i("sp", 15)
+    evasion = _i("evasion", 2)
+    status = [
+        {"label": "体力", "value": hp, "max": hp},
+        {"label": "霊力", "value": sp, "max": sp},
+        {"label": "回避D", "value": evasion, "max": evasion},
+        {"label": "形代", "value": _item("katashiro"), "max": _item("katashiro")},
+        {"label": "祓串", "value": _item("haraegushi"), "max": _item("haraegushi")},
+        {"label": "注連鋼縄", "value": _item("shimenawa"), "max": _item("shimenawa")},
+        {"label": "呪瘤檀", "value": _item("juryudan"), "max": _item("juryudan")},
+        {"label": "医霊器具", "value": _item("ireikigu"), "max": _item("ireikigu")},
+        {"label": "名伏", "value": _item("meifuku"), "max": _item("meifuku")},
+        {"label": "術延起点", "value": _item("jutsuyen"), "max": _item("jutsuyen")},
+    ]
+    params = [
+        {"label": "体", "value": str(_i("body", 3))},
+        {"label": "霊", "value": str(_i("soul", 3))},
+        {"label": "巧", "value": str(_i("skill", 3))},
+        {"label": "術", "value": str(_i("magic", 3))},
+        {"label": "機動力", "value": str(_i("mobility", 3))},
+        {"label": "装甲", "value": str(_i("armor", 0))},
+    ]
+    return {
+        "kind": "character",
+        "data": {
+            "name": name,
+            "initiative": 0,
+            "memo": memo,
+            "commands": _build_ccfolia_commands(sheet),
+            "status": status,
+            "params": params,
+        },
+    }
 
 
 def _build_ccfolia_commands(sheet: dict) -> str:
