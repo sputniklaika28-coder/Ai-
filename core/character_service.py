@@ -228,19 +228,45 @@ class CharacterService:
         concept_text: str,
         *,
         temperature: float = 0.7,
-        max_tokens: int = 1500,
+        max_tokens: int = 4096,
     ) -> CharacterBundle | None:
         """コンセプト文字列から bundle を AI 生成する。
 
-        アクティブなルールシステムが Pydantic スキーマを提供していれば
-        `generate_structured` で直接シートを生成する。それ以外は PersonaBuilder の
-        汎用コンセプト→シート変換にフォールバックする。
+        優先順位:
+          1. ルールシステムが `build_character_generation_prompt` を実装していれば
+             それを使って world_setting + 参考シートを丸ごと注入した素のテキスト
+             生成を行い、CCFolia 形式の JSON を直接受け取る（qwen3 実証済みパス）。
+          2. それ以外で Pydantic スキーマがあれば structured 生成にフォールバック。
+          3. 汎用パスとして PersonaBuilder に委譲。
         """
         if self._lm_client is None:
             logger.warning("generate_from_concept: LMClient が未設定")
             return None
 
         rule = self._active_rule_system()
+
+        # --- (1) world_setting 注入型のプロンプトパス ---
+        if rule is not None:
+            try:
+                prompt_pair = rule.build_character_generation_prompt(concept_text)
+            except Exception as e:
+                logger.warning("build_character_generation_prompt エラー: %s", e)
+                prompt_pair = None
+            if prompt_pair is not None:
+                sheet = self._generate_sheet_via_prompt(
+                    prompt_pair, temperature=temperature, max_tokens=max_tokens
+                )
+                if sheet is not None:
+                    return CharacterBundle(
+                        sheet=sheet,
+                        roster_entry={
+                            "name": sheet.get("name", ""),
+                            "description": (sheet.get("memo", "") or "")[:200],
+                        },
+                        persona=sheet.get("_persona", {}),
+                    )
+
+        # --- (2) 構造化スキーマパス (後方互換) ---
         schema = None
         if rule is not None:
             try:
@@ -250,7 +276,6 @@ class CharacterService:
 
         from core.schemas import CharacterConceptOutput
 
-        # ルール固有シートが定義されていればそのまま生成
         if schema is not None and schema is not CharacterConceptOutput:
             sheet = self._generate_sheet_direct(rule, concept_text, schema, temperature, max_tokens)
             if sheet is None:
@@ -261,8 +286,47 @@ class CharacterService:
                 persona=sheet.get("_persona", {}),
             )
 
-        # 汎用パス: PersonaBuilder を使う
+        # --- (3) 汎用パス ---
         return self._generate_via_persona_builder(concept_text)
+
+    def _generate_sheet_via_prompt(
+        self,
+        prompt_pair: tuple[str, str],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> dict | None:
+        """`(system_prompt, user_message)` からそのまま CCFolia JSON を得るパス。
+
+        ルールシステム側で world_setting と参考シートを詰め込んでいる前提。
+        受け取った JSON はフラットシートに展開し、原形を `_vtt_piece_raw` へ保存する。
+        """
+        assert self._lm_client is not None
+        system_prompt, user_message = prompt_pair
+        try:
+            content, _tool_calls = self._lm_client.generate_response_sync(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=None,
+            )
+        except Exception as e:
+            logger.error("generate_response_sync エラー: %s", e)
+            return None
+
+        if not content:
+            logger.warning("generate_response_sync: 空応答")
+            return None
+
+        import json as _json
+        try:
+            piece = _json.loads(content)
+        except Exception as e:
+            logger.warning("CCFolia JSON パース失敗: %s / raw=%s", e, content[:300])
+            return None
+
+        return _ccfolia_piece_to_flat_sheet(piece)
 
     def _generate_sheet_direct(
         self,
@@ -354,3 +418,70 @@ class CharacterService:
 def _safe_filename(name: str) -> str:
     """保存ファイル名として使える文字のみ残す。"""
     return "".join(c for c in name if c.isalnum() or c in " _-（）").strip() or "unnamed"
+
+
+def _ccfolia_piece_to_flat_sheet(piece: Any) -> dict | None:
+    """CCFolia 形式 `{"kind":"character","data":{...}}` → フラットシート。
+
+    AI が組んだ memo/commands/status/params はそのまま `_vtt_piece_raw` として
+    保存し、flat フィールド（name/hp/sp/...）は status/params 配列から抽出する。
+    """
+    if not isinstance(piece, dict) or piece.get("kind") != "character":
+        return None
+    data = piece.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    status = data.get("status") or []
+    params = data.get("params") or []
+
+    def _pick_status(label: str, default: int = 0) -> int:
+        for entry in status:
+            if isinstance(entry, dict) and entry.get("label") == label:
+                try:
+                    return int(entry.get("value", default))
+                except (TypeError, ValueError):
+                    return default
+        return default
+
+    def _pick_param(label: str, default: int = 0) -> int:
+        for entry in params:
+            if isinstance(entry, dict) and entry.get("label") == label:
+                try:
+                    return int(entry.get("value", default))
+                except (TypeError, ValueError):
+                    return default
+        return default
+
+    memo_raw = data.get("memo", "") or ""
+    alias = ""
+    memo = memo_raw
+    if memo_raw.startswith("【二つ名】"):
+        first_line, sep, rest = memo_raw.partition("\n")
+        alias = first_line.replace("【二つ名】", "").strip()
+        memo = rest.lstrip("\n") if sep else ""
+
+    return {
+        "name": data.get("name", "名無し"),
+        "alias": alias,
+        "memo": memo,
+        "hp": _pick_status("体力", 10),
+        "sp": _pick_status("霊力", 10),
+        "evasion": _pick_status("回避D", 2),
+        "body": _pick_param("体", 3),
+        "soul": _pick_param("霊", 3),
+        "skill": _pick_param("巧", 3),
+        "magic": _pick_param("術", 3),
+        "mobility": _pick_param("機動力", 3),
+        "armor": _pick_param("装甲", 0),
+        "items": {
+            "katashiro": _pick_status("形代", 1),
+            "haraegushi": _pick_status("祓串", 0),
+            "shimenawa": _pick_status("注連鋼縄", 0),
+            "juryudan": _pick_status("呪瘤檀", 0),
+            "ireikigu": _pick_status("医霊器具", 0),
+            "meifuku": _pick_status("名伏", 0),
+            "jutsuyen": _pick_status("術延起点", 0),
+        },
+        "_vtt_piece_raw": piece,
+    }

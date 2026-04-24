@@ -137,6 +137,17 @@ class RuleSystemAddon(AddonBase):
             },
         }
 
+    def build_character_generation_prompt(
+        self, concept: str
+    ) -> tuple[str, str] | None:
+        """AI キャラクター生成用の (system_prompt, user_message) を返す。
+
+        None を返すと CharacterService は構造化スキーマパスにフォールバックする。
+        実装時は world_setting テキストと参考シート (few-shot) をプロンプトへ
+        直接注入し、AI には CCFolia 貼付形式の JSON をそのまま出力させること。
+        """
+        return None
+
 
 class ToolAddon(AddonBase):
     """ツールアドオンの拡張基底クラス。
